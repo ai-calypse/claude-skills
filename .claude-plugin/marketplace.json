@@ -25,11 +25,6 @@
       "description": "core skills (28)"
     },
     {
-      "name": "dev-tools",
-      "source": "./plugins/dev-tools",
-      "description": "dev-tools skills (1)"
-    },
-    {
       "name": "flutter",
       "source": "./plugins/flutter",
       "description": "flutter skills (10)"
