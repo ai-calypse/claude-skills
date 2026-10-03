@@ -24,7 +24,7 @@ Never install a plugin at user scope except `core`. When no signal matches, inst
 
 | Plugin | Install when the project has | Skills |
 |---|---|---|
-| `core` | Installed globally; never install per project | Blog writing and SEO (`blog`, `blog-*`, `search-console`, `llms-visibility`), `ast-grep`, `worktree-create`, `worktree-merge`, `rules-check-drift`, `drive-screen`, `find-skills`, `mcp-builder` |
+| `core` | Installed globally; never install per project | Blog writing and SEO (`blog`, `blog-*`, `search-console`, `llms-visibility`), `ast-grep`, `worktree-create`, `worktree-merge`, `rules-check-drift`, `drive-screen`, `find-skills`, `mcp-builder`, `project-plugins` (reads this guide and suggests plugins) |
 | `clerk` | `@clerk/*` dependency, `CLERK_*` env vars, or the user asks for auth with Clerk | 20 Clerk skills: setup, CLI, Backend API, orgs, billing, webhooks, testing, custom UI, and framework patterns for Next.js, React, React Router, TanStack, Vue, Nuxt, Astro, Expo, Swift, Android and Chrome extensions |
 | `cloudflare` | `wrangler.toml` / `wrangler.jsonc`, `@cloudflare/*` dependency, Workers, Pages, D1, R2, KV or Durable Objects | `cloudflare`, `wrangler`, `durable-objects`, `workers-best-practices`, `agents-sdk`, `sandbox-sdk`, `cloudflare-email-service`, `web-perf` |
 | `flutter` | `pubspec.yaml` with a Flutter SDK dependency | Widget and integration tests, widget previews, architecture, responsive layout, layout fixes, JSON serialization, `go_router` routing, localization, the `http` package |

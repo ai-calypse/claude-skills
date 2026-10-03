@@ -22,7 +22,7 @@
     {
       "name": "core",
       "source": "./plugins/core",
-      "description": "core skills (28)"
+      "description": "core skills (29)"
     },
     {
       "name": "flutter",
