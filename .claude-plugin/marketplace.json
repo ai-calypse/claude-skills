@@ -10,11 +10,6 @@
       "description": "ai-dev skills (3)"
     },
     {
-      "name": "blog-seo",
-      "source": "./plugins/blog-seo",
-      "description": "blog-seo skills (21)"
-    },
-    {
       "name": "clerk",
       "source": "./plugins/clerk",
       "description": "clerk skills (20)"
@@ -27,7 +22,7 @@
     {
       "name": "core",
       "source": "./plugins/core",
-      "description": "core skills (2)"
+      "description": "core skills (23)"
     },
     {
       "name": "flutter",
