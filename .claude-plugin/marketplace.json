@@ -25,6 +25,11 @@
       "description": "core skills (23)"
     },
     {
+      "name": "dev-tools",
+      "source": "./plugins/dev-tools",
+      "description": "dev-tools skills (5)"
+    },
+    {
       "name": "flutter",
       "source": "./plugins/flutter",
       "description": "flutter skills (10)"
@@ -47,7 +52,7 @@
     {
       "name": "productivity",
       "source": "./plugins/productivity",
-      "description": "productivity skills (11)"
+      "description": "productivity skills (14)"
     },
     {
       "name": "rust",
