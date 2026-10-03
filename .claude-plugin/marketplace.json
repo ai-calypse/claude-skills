@@ -1,0 +1,68 @@
+{
+  "name": "yaksh-skills",
+  "owner": {
+    "name": "Yaksh Gandhi"
+  },
+  "plugins": [
+    {
+      "name": "ai-dev",
+      "source": "./plugins/ai-dev",
+      "description": "ai-dev skills (4)"
+    },
+    {
+      "name": "blog-seo",
+      "source": "./plugins/blog-seo",
+      "description": "blog-seo skills (21)"
+    },
+    {
+      "name": "clerk",
+      "source": "./plugins/clerk",
+      "description": "clerk skills (20)"
+    },
+    {
+      "name": "cloudflare",
+      "source": "./plugins/cloudflare",
+      "description": "cloudflare skills (8)"
+    },
+    {
+      "name": "core",
+      "source": "./plugins/core",
+      "description": "core skills (1)"
+    },
+    {
+      "name": "flutter",
+      "source": "./plugins/flutter",
+      "description": "flutter skills (10)"
+    },
+    {
+      "name": "media",
+      "source": "./plugins/media",
+      "description": "media skills (12)"
+    },
+    {
+      "name": "mobile",
+      "source": "./plugins/mobile",
+      "description": "mobile skills (3)"
+    },
+    {
+      "name": "pinokio",
+      "source": "./plugins/pinokio",
+      "description": "pinokio skills (2)"
+    },
+    {
+      "name": "productivity",
+      "source": "./plugins/productivity",
+      "description": "productivity skills (11)"
+    },
+    {
+      "name": "rust",
+      "source": "./plugins/rust",
+      "description": "rust skills (1)"
+    },
+    {
+      "name": "web-design",
+      "source": "./plugins/web-design",
+      "description": "web-design skills (7)"
+    }
+  ]
+}
