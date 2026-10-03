@@ -1,0 +1,158 @@
+---
+title: Development Modes
+description: Three development modes for Tauri apps — full native, frontend-only mock, and hybrid REST
+sidebar_position: 5
+---
+
+# Development Modes
+
+A Tauri app with a pure Rust backend and React frontend can be developed in three modes, each trading off between fidelity and iteration speed. The backend bridge adapter pattern makes all three modes possible from the same frontend codebase.
+
+## The Three Modes
+
+| Mode | Command | Port | Backend | Adapter | Iteration Speed |
+|------|---------|------|---------|---------|-----------------|
+| Full Tauri | `pnpm tauri:dev` | Vite HMR | Rust (IPC) | TauriAdapter | Slow (Rust recompile) |
+| Mock | `pnpm dev:mock` | 1421 | None | MockAdapter | Fast (Vite only) |
+| REST | `pnpm dev:rest` | 1422 | Rust (HTTP) | RestAdapter | Medium (Vite + HTTP) |
+
+## Mode 1: Full Tauri (`pnpm tauri:dev`)
+
+This is the closest to production. Tauri starts the Rust backend, then launches the WebView pointing at Vite's dev server for hot module replacement:
+
+```bash
+pnpm tauri:dev
+# Equivalent to: cd tauri-app && cargo tauri dev
+```
+
+**What happens:**
+
+1. Cargo compiles the Rust crate (first run: ~30-60 seconds, incremental: ~5-15 seconds)
+2. Vite starts the frontend dev server with HMR
+3. Tauri opens a native window with WebView pointing to `http://localhost:1420`
+4. The frontend uses `TauriAdapter` -- all backend calls go through Tauri's IPC (`invoke()` / `listen()`)
+
+**When to use:**
+
+- Testing native features (file watchers, PTY terminal, native dialogs)
+- Verifying real file system operations
+- Testing the app as users will experience it
+- Final integration testing before building
+
+**Trade-off:** Every Rust code change triggers a recompile. Frontend changes are instant via HMR.
+
+## Mode 2: Mock (`pnpm dev:mock`)
+
+Frontend-only development with no Rust backend at all:
+
+```bash
+pnpm dev:mock
+# Equivalent to: cd tauri-app && pnpm exec vite --config vite.config.mock.ts
+```
+
+**What happens:**
+
+1. Vite starts on port 1421 with the mock Vite config
+2. The frontend uses `MockAdapter` -- all backend calls go to an in-memory implementation
+3. Mock data (sample messages, pin tree, font list) is seeded on startup
+4. The app opens in a regular browser window (no native WebView)
+
+**When to use:**
+
+- Working on React components, styles, or layout
+- Running Storybook stories
+- Working on a machine without Rust toolchain (e.g., CI, WSL2 without display)
+- Rapid UI prototyping
+
+**Trade-off:** No real file system operations. Terminal does not work. Native dialogs are stubbed.
+
+<Tip>
+
+Mock mode is the fastest way to iterate on UI changes. It starts in under 2 seconds and provides full HMR. Use it as the default for frontend work.
+
+</Tip>
+
+## Mode 3: REST (`pnpm dev:rest`)
+
+Hybrid mode: frontend runs in the browser, but communicates with a real Rust backend via HTTP/SSE:
+
+```bash
+# Terminal 1: Start the Tauri app (which includes the axum HTTP server on port 3001)
+pnpm tauri:dev
+
+# Terminal 2: Start the frontend dev server on port 1422
+pnpm dev:rest
+# Equivalent to: cd tauri-app && pnpm exec vite --config vite.config.rest.ts
+```
+
+**What happens:**
+
+1. The Tauri app starts and exposes an HTTP API on `localhost:3001`
+2. A separate Vite dev server starts on port 1422
+3. The frontend uses `RestAdapter` -- commands become HTTP requests, events use SSE
+4. You work in a browser window, but against real data
+
+**When to use:**
+
+- Debugging frontend against real backend data
+- Using browser DevTools (which are more powerful than WebView DevTools)
+- Testing the REST API itself
+- When you want real file operations but faster frontend iteration than full Tauri mode
+
+**Trade-off:** Requires the Tauri app to be running. Some features (terminal, native dialogs) are not available over HTTP.
+
+## How Adapter Selection Works
+
+Each Vite config sets an environment variable or import alias that determines which adapter is used at startup:
+
+```ts
+// vite.config.mock.ts -> MockAdapter
+// vite.config.rest.ts -> RestAdapter
+// Default (Tauri) -> TauriAdapter
+```
+
+The app's entry point initializes the backend bridge once:
+
+```ts
+import { initBackend } from "@takazudo/backend-bridge";
+
+// The specific adapter is imported based on the Vite config
+initBackend(adapter);
+```
+
+After initialization, all components call `getBackend()` without knowing which adapter is active.
+
+## Comparison Table
+
+| Feature | Full Tauri | Mock | REST |
+|---------|-----------|------|------|
+| File read/write | Real filesystem | In-memory Map | Real filesystem |
+| Terminal (PTY) | Works | Stubbed | Stubbed |
+| Native dialogs | Works | Returns null | Returns null |
+| File watchers | Real events | Manual triggers | SSE events |
+| Settings persistence | `.zudotext.settings.json` | In-memory | `.zudotext.settings.json` |
+| Browser DevTools | Limited (WebView) | Full | Full |
+| Startup time | 5-60 seconds | &lt;2 seconds | 5-60 seconds + &lt;2s |
+| HMR | Frontend only | Frontend only | Frontend only |
+| Rust changes | Auto-recompile | N/A | Requires restart |
+
+## Build Modes
+
+Beyond development, there are also build commands for each mode:
+
+```bash
+# Build for mock (static site, no backend needed)
+pnpm build:mock
+
+# Build for REST (static site, expects backend at localhost:3001)
+pnpm build:rest
+
+# Build for Tauri (production .app bundle)
+pnpm tauri:build
+```
+
+The mock build is used for the live preview site (deployed to Cloudflare Pages), which demonstrates the app's UI without any backend.
+
+## Key Takeaway
+
+The three development modes form a spectrum from fast iteration to full fidelity. Mock mode for UI work, REST mode for debugging with real data, full Tauri mode for integration testing. The backend bridge adapter pattern makes this possible without any conditional code in components -- they always call `getBackend()` and get the appropriate implementation.

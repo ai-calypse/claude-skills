@@ -1,0 +1,261 @@
+---
+title: Core Crate Testing Pattern
+description: Extracting business logic into a standalone Rust crate without Tauri dependencies for cross-platform testing
+sidebar_position: 12
+---
+
+# Core Crate Testing Pattern
+
+Tauri commands depend on Tauri's runtime (app handle, window, state management), which in turn depends on platform-specific GUI libraries (GTK on Linux, Cocoa on macOS). This makes `cargo test` impossible on headless CI runners, WSL2, or any environment without a display server.
+
+The solution is to extract pure business logic into a separate `core` crate that has zero Tauri dependencies.
+
+## The Problem
+
+A typical Tauri command handler looks like this:
+
+```rust
+#[tauri::command]
+fn settings_get(state: State<'_, AppState>) -> Option<serde_json::Value> {
+    let root = state.project_root.lock().unwrap();
+    let path = Path::new(&*root).join(".zudotext.settings.json");
+    let content = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+```
+
+The business logic (read a file, parse JSON) is simple, but the function signature ties it to `tauri::State`. You cannot call this function without a running Tauri app.
+
+## The Core Crate Structure
+
+The `zudotext-core` crate mirrors the business logic without Tauri types:
+
+```
+tauri-app/
+  core/                      # zudotext-core crate
+    Cargo.toml
+    src/
+      lib.rs                 # Module declarations
+      settings.rs            # Settings read/write
+      drafts.rs              # Draft management
+      messages.rs            # Message CRUD
+      pins.rs                # Pin directory operations
+      assets.rs              # Asset file management
+      draft.rs               # Single-draft operations
+      workspace_registry.rs  # Multi-workspace management
+      helpers/               # Shared utilities
+  src/                       # Tauri crate (depends on core)
+    main.rs
+    commands/                # Tauri command handlers (thin wrappers)
+    state.rs
+```
+
+### Core Crate Dependencies
+
+The core crate only depends on standard ecosystem crates:
+
+```toml
+[package]
+name = "zudotext-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+dirs = "5"
+base64 = "0.22"
+trash = "5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+font-kit = "0.14"
+
+[dev-dependencies]
+tempfile = "3"
+```
+
+<Note>
+
+There is no `tauri` dependency anywhere in this crate. The `font-kit` dependency is conditionally compiled only on macOS for system font enumeration -- it does not pull in GUI libraries.
+
+</Note>
+
+## Pure Functions with Path Parameters
+
+The key pattern is replacing `State<'_, AppState>` with a plain `&str` project root parameter:
+
+**Core crate** (pure logic):
+
+```rust
+// core/src/settings.rs
+
+pub fn settings_get(project_root: &str) -> Option<serde_json::Value> {
+    if project_root.is_empty() {
+        return None;
+    }
+    let settings_path = Path::new(project_root).join(".zudotext.settings.json");
+    let content = fs::read_to_string(&settings_path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+pub fn settings_save(project_root: &str, settings: &serde_json::Value) -> bool {
+    if project_root.is_empty() {
+        return false;
+    }
+    if !settings.is_object() {
+        return false;
+    }
+    let settings_path = Path::new(project_root).join(".zudotext.settings.json");
+    match serde_json::to_string_pretty(settings) {
+        Ok(json) => fs::write(&settings_path, json).is_ok(),
+        Err(_) => false,
+    }
+}
+```
+
+**Tauri crate** (thin wrapper):
+
+```rust
+// src/commands/settings.rs
+
+#[tauri::command]
+fn settings_get(state: State<'_, AppState>) -> Option<serde_json::Value> {
+    let root = state.project_root.lock().unwrap();
+    zudotext_core::settings::settings_get(&root)
+}
+```
+
+The Tauri command handler does nothing but extract the project root from state and delegate to the core function.
+
+## Testing with `tempfile`
+
+Because core functions take a path string, tests create temporary directories with known content:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_settings_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let settings = json!({
+            "theme": "dark",
+            "draftCount": 5,
+            "activeDraft": 2,
+            "pins": [{"path": "docs", "title": "Docs"}]
+        });
+
+        assert!(settings_save(root, &settings));
+        let loaded = settings_get(root).unwrap();
+        assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn test_settings_get_returns_none_for_empty_root() {
+        assert_eq!(settings_get(""), None);
+    }
+
+    #[test]
+    fn test_settings_save_rejects_non_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+
+        assert!(!settings_save(root, &json!("string")));
+        assert!(!settings_save(root, &json!(42)));
+        assert!(!settings_save(root, &json!([1, 2, 3])));
+    }
+}
+```
+
+These tests run with a simple `cargo test` -- no display server, no Tauri runtime, no GTK.
+
+## A More Complex Example: Draft Management
+
+The drafts module shows the pattern with more complex business logic. Draft files live on disk as `inbox/draft1.md`, `inbox/draft2.md`, etc.:
+
+```rust
+// core/src/drafts.rs
+
+pub fn discover_draft_count(project_root: &str) -> u32 {
+    let inbox = Path::new(project_root).join("inbox");
+    let mut max: u32 = 0;
+    if let Ok(entries) = fs::read_dir(&inbox) {
+        for entry in entries.flatten() {
+            if let Some(n) = parse_draft_number(entry.file_name().to_str().unwrap_or("")) {
+                if n > max { max = n; }
+            }
+        }
+    }
+    if max == 0 { 1 } else { max }
+}
+
+pub fn drafts_tidy_up(project_root: &str) -> Option<TidyUpResult> {
+    // Collect non-empty drafts, compact gaps, remove trailing files
+    // ...complex logic with disk I/O...
+}
+```
+
+The tests create realistic directory structures:
+
+```rust
+#[test]
+fn test_drafts_tidy_up_compacts_gaps() {
+    let dir = setup_project(json!({"activeDraft": 4}));
+    let root = dir.path().to_str().unwrap();
+
+    let inbox = dir.path().join("inbox");
+    fs::create_dir_all(&inbox).unwrap();
+    fs::write(inbox.join("draft1.md"), "Draft 1").unwrap();
+    fs::write(inbox.join("draft2.md"), "").unwrap();       // empty
+    fs::write(inbox.join("draft3.md"), "  \n  ").unwrap(); // whitespace-only
+    fs::write(inbox.join("draft4.md"), "Draft 4").unwrap();
+
+    let result = drafts_tidy_up(root).unwrap();
+    assert_eq!(result.new_count, 2);
+    assert_eq!(result.new_active, 2); // draft4 moved to position 2
+}
+```
+
+## Running Tests
+
+```bash
+# Run all core crate tests (works on any platform)
+cd tauri-app/core && cargo test
+
+# Run with output for debugging
+cd tauri-app/core && cargo test -- --nocapture
+```
+
+This works on:
+
+- macOS (development machine)
+- WSL2 (no display server)
+- GitHub Actions headless runners (no GTK)
+- Any Linux server
+
+## When to Use This Pattern
+
+<Warning>
+
+Not all Tauri command logic should be moved to the core crate. Keep it in the Tauri crate if the logic:
+
+- Needs the app handle (e.g., window management, menu creation)
+- Requires Tauri plugins (e.g., native dialogs, system tray)
+- Manages Tauri-specific state (e.g., watcher handles, PTY process references)
+
+</Warning>
+
+Move to the core crate when the logic:
+
+- Reads/writes files based on a project root path
+- Parses or validates data structures (settings, frontmatter)
+- Performs business logic that does not need Tauri APIs
+- Would benefit from testing on CI without platform dependencies
+
+## Key Takeaway
+
+The pattern is simple: **accept a path parameter instead of Tauri state, do file I/O against that path, and use `tempfile` in tests.** The Tauri command handler becomes a one-line delegation that extracts the path from state and calls the core function. This separation pays off immediately in testing speed and CI compatibility.

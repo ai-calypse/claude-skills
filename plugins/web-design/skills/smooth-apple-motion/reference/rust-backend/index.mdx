@@ -1,0 +1,68 @@
+---
+title: Rust Backend Patterns
+description: Overview of Tauri v2 Rust backend patterns for building robust desktop applications.
+sidebar_position: 1
+---
+
+This section covers battle-tested Rust backend patterns for Tauri v2 applications. These patterns are not framework-specific theories -- they come from real production apps and address problems you will actually encounter.
+
+## What you will find here
+
+### Mutex Safety
+
+Tauri commands receive shared state through `State<AppState>`. That state is typically protected by `Mutex`, and using it incorrectly will crash your application. The [Mutex Safety](./mutex-safety.mdx) page covers the rules.
+
+### Settings Cache with External Edit Detection
+
+Reading settings from disk on every IPC call is wasteful, but naive caching breaks when the user (or another application) edits the file externally. The [Settings Cache](./settings-cache.mdx) page shows an mtime-based invalidation strategy.
+
+### Debounced File Watchers
+
+File system watchers fire rapidly and redundantly. The [File Watchers](./file-watchers.mdx) page covers a generic debounced watch loop, `Send`-safety patterns for background threads, and write markers to distinguish app writes from external changes.
+
+### Menu Event Handlers
+
+`on_menu_event` runs on the main thread. Blocking it freezes the entire application. The [Menu Events](./menu-events.mdx) page shows the correct patterns for spawning background work from menu handlers.
+
+### Window Management
+
+Creating windows programmatically gives you control over splash screens, dev server polling, and platform-specific behaviors. The [Window Management](./window-management.mdx) page covers the full window lifecycle.
+
+### External-Tool Preview/Accept/Cancel Actions
+
+A monorepo desktop app often ships its own CLI tools alongside the Tauri shell. The [External-Tool Actions](./external-tool-actions.mdx) page covers running bundled Node CLIs as one-shot subprocesses, staging their output in the system temp dir, and wiring a preview → accept → cancel contract so destructive file overwrites stay under explicit user control.
+
+### Persisting Settings to the OS Config Directory
+
+Global app settings belong in the OS-standard per-user config directory, not next to the binary. The [Settings Persistence](./settings-persistence.mdx) page covers reading and writing `settings.json` with the `dirs` crate, falling back to defaults on a corrupt file, and validating paths before persisting them.
+
+## Common architecture
+
+A typical Tauri v2 Rust backend follows this structure:
+
+```
+src/
+  main.rs          # Builder setup, invoke_handler, setup()
+  state.rs         # AppState definition (Mutex-wrapped fields)
+  commands/
+    mod.rs         # Module declarations
+    files.rs       # File operation commands
+    settings.rs    # Settings read/write with cache
+    watchers.rs    # File watcher management
+    terminal.rs    # PTY/process commands
+    workspace.rs   # Workspace switching
+  native/
+    mod.rs         # Module declarations
+    menu.rs        # Menu creation and event handlers
+    window.rs      # Window creation and lifecycle
+    dialog.rs      # Native dialogs
+  helpers/
+    ...            # Utility functions
+```
+
+The key architectural decisions:
+
+1. **Single `AppState` struct** with all shared state behind `Mutex` fields
+2. **Arc wrapping** -- `AppState` is wrapped in `Arc` so it can be shared between the Tauri runtime and background threads (e.g., HTTP server)
+3. **Commands in dedicated modules** -- each command module focuses on one domain
+4. **Platform-specific code** behind `#[cfg(target_os = "macos")]` guards

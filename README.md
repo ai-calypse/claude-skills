@@ -29,14 +29,14 @@ Never install a plugin at user scope except `core`. When no signal matches, inst
 | `cloudflare` | `wrangler.toml` / `wrangler.jsonc`, `@cloudflare/*` dependency, Workers, Pages, D1, R2, KV or Durable Objects | `cloudflare`, `wrangler`, `durable-objects`, `workers-best-practices`, `agents-sdk`, `sandbox-sdk`, `cloudflare-email-service`, `web-perf` |
 | `flutter` | `pubspec.yaml` with a Flutter SDK dependency | Widget and integration tests, widget previews, architecture, responsive layout, layout fixes, JSON serialization, `go_router` routing, localization, the `http` package |
 | `mobile` | `*.xcodeproj`, `Package.swift`, SwiftUI code, Expo / React Native, or a Tauri app (`src-tauri/`) | `swiftui-pro` (SwiftUI review), `liquid-glass` (iOS/macOS 26 glass effects), `expo-motion` (Expo animation), `smooth-apple-motion` (Tauri v2 desktop and iOS field notes) |
-| `web-design` | A web frontend where UI quality matters: landing pages, marketing sites, dashboards, animation or Three.js work | `impeccable`, `emil-design-eng`, `apple-design`, `review-animations`, `animation-vocabulary`, `threejs-shaders`, `threejs-postprocessing` |
+| `web-design` | A web frontend where UI quality matters: landing pages, marketing sites, dashboards, animation or Three.js work | `impeccable`, `emil-design-eng`, `apple-design`, `review-animations`, `animation-vocabulary`, `threejs-shaders`, `threejs-postprocessing`, `smooth-apple-motion` (same skill as in `mobile`) |
 | `media` | Image, video or GIF generation, Higgsfield, Remotion, or design assets | Six Higgsfield skills, `nano-banana`, `motion-graphics`, `video-downloader`, `canvas-design`, `slack-gif-creator`, `theme-factory` |
 | `ai-dev` | An AI chat UI (`ai` / `@ai-sdk/*` with chat components), Composio, or LangChain / LangGraph agents | `ai-elements`, `composio`, `langsmith-fetch` |
 | `rust` | `Cargo.toml` | `rust-skills` |
 | `pinokio` | A Pinokio launcher (`pinokio.js`) or the user mentions Pinokio | `pinokio`, `gepeto` |
 | `productivity` | Not tied to a codebase. Install when the user asks for one of these tasks. | `agent-reach` (web and social research), `second-brain-audit`, `second-brain-fix`, `tailored-resume-generator`, `domain-name-brainstormer`, `invoice-organizer`, `file-organizer`, `meeting-insights-analyzer`, `lead-research-assistant`, `competitive-ads-extractor`, `twitter-algorithm-optimizer`, `raffle-winner-picker`, `developer-growth-analysis` |
 
-A Tauri app usually needs `mobile` and `web-design`, and `rust` too if the Rust backend is substantial.
+`smooth-apple-motion` is in both `mobile` and `web-design`, so a project with both installed loads it twice; that is harmless but costs a little context. A Tauri app usually needs `mobile` and `web-design`, and `rust` too if the Rust backend is substantial.
 
 ## Setup on a new machine
 

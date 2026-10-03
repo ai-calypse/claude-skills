@@ -1,0 +1,233 @@
+---
+title: WKWebView Gotchas on iOS
+description: Safe-area insets, keyboard behavior, position fixed, service workers, cookies, and other WKWebView quirks
+sidebar_position: 6
+---
+
+A Tauri iOS app is a `WKWebView` wrapped in a Swift shell. `WKWebView` is not Safari, and it is not the WebView2 you know from Tauri on Windows. This page is the laundry list of web-platform quirks that tend to bite when porting a Vite + React web app to iOS.
+
+## Safe-Area Insets
+
+iPhones with a notch or Dynamic Island need CSS to avoid drawing under the status bar, home indicator, and side cutouts.
+
+### Declare `viewport-fit=cover`
+
+In your `index.html`:
+
+```html
+<meta
+  name="viewport"
+  content="width=device-width, initial-scale=1, viewport-fit=cover"
+/>
+```
+
+Without `viewport-fit=cover`, `env(safe-area-inset-*)` returns `0` on all sides, and you get letterboxed bars at the top and bottom.
+
+### Use `env(safe-area-inset-*)`
+
+```css
+.app-header {
+  padding-top: env(safe-area-inset-top);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+.app-footer {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+```
+
+### Known WKWebView Bug: Insets Not Set on First Paint
+
+[WebKit bug 191872](https://bugs.webkit.org/show_bug.cgi?id=191872): `env(safe-area-inset-*)` values may not be set until a short time after page load. If your initial layout depends on these values, you see a flash of wrong layout.
+
+Workarounds:
+
+- Use `min-height` / `min-padding` fallbacks: `padding-top: max(env(safe-area-inset-top), 20px)`
+- Trigger a re-layout after a short timeout: `requestAnimationFrame` twice is usually enough
+- Accept the flash and style the fallback to look acceptable
+
+### Rotation Bug
+
+Safe-area values don't always update correctly after device rotation. After portrait > landscape > portrait, `env(safe-area-inset-top)` can be stuck at `0` until the next layout pass. If your app supports rotation (it usually shouldn't on iPhone), test this explicitly.
+
+## Keyboard and Viewport Resize
+
+When the on-screen keyboard appears, WKWebView behaves differently from desktop Safari.
+
+### The Viewport Does Not Resize
+
+The `window.innerHeight` does **not** shrink when the keyboard opens. Instead, the WebView's content stays the same size and the keyboard covers the bottom portion of the page. Your `position: fixed` bottom bar ends up hidden under the keyboard.
+
+### Use Visual Viewport API
+
+The `visualViewport` API exposes the visible region:
+
+```ts
+const handleViewportChange = () => {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  document.documentElement.style.setProperty(
+    "--keyboard-inset",
+    `${window.innerHeight - vv.height - vv.offsetTop}px`
+  );
+};
+window.visualViewport?.addEventListener("resize", handleViewportChange);
+window.visualViewport?.addEventListener("scroll", handleViewportChange);
+```
+
+Then in CSS:
+
+```css
+.bottom-toolbar {
+  position: fixed;
+  bottom: calc(var(--keyboard-inset, 0px) + env(safe-area-inset-bottom));
+}
+```
+
+### Input Focus Scroll Jump
+
+When an input at the bottom of the page gets focus, WKWebView auto-scrolls it into view. Sometimes the scroll target is wrong and the input jumps off-screen or sits under the keyboard.
+
+Mitigations:
+
+- Use `scroll-margin-bottom` on inputs: `input { scroll-margin-bottom: 100px; }`
+- Call `input.scrollIntoView({ block: "center" })` manually on focus
+- Avoid `position: fixed` containers with `overflow: hidden` around forms -- WKWebView's scroll-into-view logic gets confused by nested scroll contexts
+
+### Keyboard Leaves Viewport Shifted
+
+On some iOS versions (notably iOS 12 and a handful of regressions since), dismissing the keyboard can leave the WKWebView content offset by the keyboard height. Scrolling the page fixes it, but it looks broken for the half-second before the user notices.
+
+If you see this, force a layout after keyboard close:
+
+```ts
+input.addEventListener("blur", () => {
+  requestAnimationFrame(() => window.scrollTo(0, window.scrollY));
+});
+```
+
+## `position: fixed` With Scrolled Content
+
+`position: fixed` elements can flicker or detach from their intended position during inertial scrolling. The flicker is classic WKWebView behavior that's been around for years.
+
+Mitigations:
+
+- Add `transform: translateZ(0)` or `will-change: transform` to the fixed element to force a separate compositor layer
+- Avoid fixed elements inside scrollable containers -- keep them at the body level
+- Consider `position: sticky` when semantically acceptable -- it avoids many of the fixed-positioning edge cases
+
+## Service Workers: Mostly Not Available
+
+`WKWebView` does **not** run service workers for app-embedded web content by default. Service workers only work in:
+
+- Safari
+- An app with the Web Browser entitlement (a private Apple entitlement not available to third-party devs)
+- An app that sets `config.limitsNavigationsToAppBoundDomains = true` on its `WKWebViewConfiguration` **and** declares the domains in `WKAppBoundDomains` in Info.plist
+
+Tauri does not currently toggle App-Bound Domains mode for you, so assume service workers do not work.
+
+### Implications
+
+- No offline support via service workers
+- No background sync
+- No push via the Push API (use native APNs through a Tauri plugin on a paid team)
+
+### What Works Instead
+
+- **Web Workers** -- regular worker threads work fine in WKWebView
+- **IndexedDB** / **LocalStorage** -- available, with tighter quotas than Safari proper
+- **Cache API** -- available, but without a service worker to populate it, limited value
+- **Fetch with HTTP cache** -- you get normal browser caching behavior
+
+## Cookies and `localhost` vs LAN
+
+During dev, your frontend loads from `http://<LAN-IP>:1420`. Cookies set by your app go to that origin. If your backend is also on the LAN IP, everything works. If your backend is on a different origin, CORS applies like in any browser.
+
+Cross-origin requests from a Tauri WebView obey the normal browser CORS rules -- there is no special "Tauri bypasses CORS" mode. Use `fetch` with `credentials: "include"` and set `Access-Control-Allow-Origin` + `Access-Control-Allow-Credentials` on the backend, same as a browser.
+
+<Warning>
+
+Changing the dev server IP changes the cookie origin. If you switch Wi-Fi networks and your LAN IP changes, logged-in sessions from the previous IP won't carry over.
+
+</Warning>
+
+## PWA Features That Don't Apply
+
+If your web app is a PWA, most of the PWA-specific features are pointless inside a Tauri shell:
+
+- **Web App Manifest** -- Tauri doesn't install your app from the manifest; the iOS bundle is the installation
+- **`beforeinstallprompt`** -- never fires in WKWebView
+- **`display-mode: standalone`** -- doesn't apply; your WebView is always fullscreen-ish
+- **Web Push** -- blocked by the service worker limitation
+
+Strip these gracefully so the frontend doesn't show "Install our app!" banners when already running inside the app.
+
+## CSS `filter` Performance
+
+WKWebView is relatively slow at compositing `filter: blur()` on large surfaces. A `backdrop-filter: blur(20px)` over a full-screen area can drop frame rate noticeably on older iPhones.
+
+Mitigations:
+
+- Reduce blur radius
+- Pre-render blurred backgrounds as images when possible
+- Avoid animating filter values; static filter values are fine
+
+## Scroll Bounce / Rubber Banding
+
+By default, the WebView scrolls with iOS's rubber-band bounce at the top and bottom. This often looks wrong in a wrapper app.
+
+### Option 1: Disable via Rust
+
+Customize the `WKWebView` during setup through a `WebviewWindowBuilder` callback (check the Tauri iOS plugin story here -- APIs are evolving) to set `bounces = false` on the underlying `UIScrollView`.
+
+### Option 2: Prevent via CSS
+
+```css
+html,
+body {
+  overscroll-behavior: none;
+  height: 100%;
+  overflow: hidden;
+}
+#app {
+  height: 100%;
+  overflow: auto;
+}
+```
+
+`overscroll-behavior: none` on `html` / `body` suppresses the outer bounce. Internal scroll containers then have their own bounce behavior, which usually feels right.
+
+## Input Type Behaviors
+
+- `<input type="number">` brings up a number pad keyboard on iOS, but allows non-numeric input in WKWebView on some older versions
+- `<input type="date">` / `type="datetime-local">` renders with the native iOS wheel picker -- behavior differs from desktop date pickers
+- `<input type="file">` triggers iOS's file/camera/photo picker. Requires `NSPhotoLibraryUsageDescription` (and `NSCameraUsageDescription` if camera is an option) in `Info.ios.plist`
+
+## Tap Delay and `:hover`
+
+Modern iOS is better about the 300ms tap delay, but `:hover` states linger after a tap until another tap somewhere else. Design for this by using `:active` for immediate visual feedback and being sparing with `:hover`-only affordances.
+
+## Testing Matrix
+
+Verify these explicitly on both simulator and a real device -- a bunch of them only show up on hardware:
+
+- [ ] Safe-area insets render correctly on a notched iPhone
+- [ ] Keyboard open/close doesn't leave floating elements behind
+- [ ] Focus on an input near the bottom doesn't push content off-screen
+- [ ] Scroll bounce looks intentional, not accidental
+- [ ] Tap feedback appears within 100ms
+- [ ] Rotation doesn't leave safe-area insets stuck on wrong values (if rotation is supported)
+- [ ] Dark mode matches native UI (`prefers-color-scheme: dark`)
+
+## Related Pages
+
+- [iOS Project Structure](./ios-project-structure.mdx#infoiosplist-merging-extra-keys) for declaring camera/photo permissions in `Info.ios.plist`
+- [App Store Review 4.2](./app-store-review-4-2.mdx) for why "it's basically a web page" is a rejection risk
+
+## External References
+
+- [WebKit bug 191872: safe-area-inset not set on load](https://bugs.webkit.org/show_bug.cgi?id=191872)
+- [WebKit bug 192564: keyboard dismissal leaves viewport shifted](https://bugs.webkit.org/show_bug.cgi?id=192564)
+- [WebKit bug 206741: service worker support in WKWebView](https://bugs.webkit.org/show_bug.cgi?id=206741)
+- [Apple: WKWebViewConfiguration.limitsNavigationsToAppBoundDomains](https://developer.apple.com/documentation/webkit/wkwebviewconfiguration/3585117-limitsnavigationstoappbounddomai)

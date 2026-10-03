@@ -1,0 +1,183 @@
+---
+title: Node Detection with Version Managers
+description: Finding system-installed Node.js at absolute paths, including version managers (nodenv, nvm, volta, fnm), for apps launched from Finder
+sidebar_position: 7
+---
+
+# Node Detection with Version Managers
+
+When a Tauri app is launched from Finder (not a terminal), macOS provides a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`). Version manager shims (nodenv, nvm, volta, fnm) are not on this PATH because they are configured in shell init files (`.zshrc`, `.bashrc`) that Finder does not source.
+
+The `find_node()` function resolves the actual Node.js binary at absolute paths, bypassing shims entirely.
+
+## The Problem
+
+```rust
+// This FAILS when launched from Finder
+Command::new("node").arg("server.js").spawn();
+// Error: No such file or directory
+```
+
+Even `which node` fails because `which` itself relies on the shell PATH.
+
+## Search Order
+
+`find_node()` checks locations in this priority:
+
+1. **Direct paths** -- system and Homebrew installs
+2. **Version manager paths** -- resolve the actual binary, not the shim
+3. **Fallback** -- `which node` (rarely works from Finder, but worth trying)
+
+```rust
+fn find_node() -> Option<std::path::PathBuf> {
+    let home = home_dir();
+
+    // 1. Direct paths (system / Homebrew installs)
+    let candidates = [
+        "/opt/homebrew/bin/node",
+        "/usr/local/bin/node",
+        "/usr/bin/node",
+    ];
+    for c in &candidates {
+        let path = std::path::PathBuf::from(c);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    // 2. Version managers (see below)
+    // ...
+
+    // 3. Fallback: `which node`
+    // ...
+    None
+}
+```
+
+## Version Manager Resolution
+
+The key insight: version managers store the real Node.js binary in a known directory structure. You can find it without shell initialization by scanning these directories directly.
+
+### Supported Managers
+
+| Manager | Versions directory | Notes |
+| --- | --- | --- |
+| anyenv/nodenv | `$HOME/.anyenv/envs/nodenv/versions/` | Also check `version` file for configured global |
+| standalone nodenv | `$HOME/.nodenv/versions/` | Same structure as anyenv |
+| nvm | `$HOME/.nvm/versions/node/` | Directories named `v20.11.0` (with `v` prefix) |
+| volta | `$HOME/.volta/tools/image/node/` | Directories named `20.11.0` (no prefix) |
+| fnm | `$HOME/Library/Application Support/fnm/node-versions/` | Modern location; also check `$HOME/.fnm/node-versions/` (legacy) |
+
+### Generic Version Directory Scanner
+
+All version managers share a common pattern: a directory containing version-named subdirectories, each with `bin/node` inside. A single helper handles all of them:
+
+```rust
+fn find_node_in_versions_dir(dir: &str, label: &str) -> Option<std::path::PathBuf> {
+    let dir_path = std::path::PathBuf::from(dir);
+    if !dir_path.exists() {
+        return None;
+    }
+
+    // nodenv-style: root has `versions/` subdir and a `version` file
+    let versions_dir = if dir_path.join("versions").exists() {
+        // Check `version` file for the configured global version
+        if let Ok(ver) = fs::read_to_string(dir_path.join("version")) {
+            let ver = ver.trim();
+            let node_path = dir_path.join("versions").join(ver).join("bin").join("node");
+            if node_path.exists() {
+                return Some(node_path);
+            }
+        }
+        dir_path.join("versions")
+    } else {
+        dir_path
+    };
+
+    // Scan and pick the highest version (numeric semver sort)
+    if let Ok(entries) = fs::read_dir(&versions_dir) {
+        let mut versions: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        versions.sort_by(|a, b| {
+            let parse = |s: &str| -> Vec<u64> {
+                s.strip_prefix('v').unwrap_or(s)
+                    .split('.')
+                    .filter_map(|p| p.parse().ok())
+                    .collect()
+            };
+            parse(a).cmp(&parse(b))
+        });
+        if let Some(ver) = versions.last() {
+            let node_path = versions_dir.join(ver).join("bin").join("node");
+            if node_path.exists() {
+                return Some(node_path);
+            }
+        }
+    }
+
+    None
+}
+```
+
+<Tip>
+
+The numeric semver sort is important. Lexicographic sort puts `9.0.0` after `20.0.0`. Parsing version components as integers ensures `20.x > 9.x`.
+
+</Tip>
+
+### nodenv `version` File
+
+nodenv (both standalone and via anyenv) stores the configured global version in a `version` file at the root:
+
+```
+# $HOME/.nodenv/version or $HOME/.anyenv/envs/nodenv/version
+20.11.0
+```
+
+The scanner checks this file first, falling back to the highest installed version if the configured version is not found.
+
+## Why Not Use Shims?
+
+Version manager shims (e.g., `$HOME/.nodenv/shims/node`) are wrapper scripts that:
+
+1. Read config files to determine the target version
+2. Execute the real binary
+
+These shims require shell initialization to be on PATH. Even if you hardcode the shim path, the shim itself may depend on shell functions or environment variables that are not set in a Finder-launched context.
+
+<Warning>
+
+Always resolve to the **actual binary** (`versions/<ver>/bin/node`), never the shim. Shims may not work outside a properly initialized shell.
+
+</Warning>
+
+## Testing
+
+Test with a conditional check -- version managers may or may not be installed on the CI/dev machine:
+
+```rust
+#[test]
+fn find_node_detects_anyenv_nodenv() {
+    let home = home_dir();
+    let root = format!("{home}/.anyenv/envs/nodenv");
+    if PathBuf::from(&root).join("versions").exists() {
+        let result = find_node_in_versions_dir(&root, "nodenv");
+        assert!(result.is_some(), "should find node in anyenv/nodenv");
+        let path = result.unwrap();
+        assert!(path.exists(), "resolved node binary should exist");
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            "node",
+        );
+    }
+}
+```
+
+<Note>
+
+The function returns `None` for non-existent directories, so `find_node_in_versions_dir("/nonexistent", "test").is_none()` is a safe baseline test.
+
+</Note>

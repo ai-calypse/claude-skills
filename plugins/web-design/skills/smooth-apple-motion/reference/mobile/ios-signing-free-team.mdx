@@ -1,0 +1,177 @@
+---
+title: Signing With a Free Personal Team
+description: The 7-day provisioning profile, blocked capabilities, and the upgrade path to the paid Apple Developer Program
+sidebar_position: 5
+---
+
+Apple lets anyone with a free Apple ID build and install apps on their own physical devices. This page is about the constraints of that path and when you need to upgrade to the paid Apple Developer Program (USD 99 / year).
+
+## The Free Personal Team
+
+When you sign in to Xcode with a regular Apple ID (not a paid Apple Developer Program account), Xcode gives you a free "Personal Team". It shows up in `Xcode > Settings > Accounts` as `Your Name (Personal Team)`.
+
+What the Personal Team can do:
+
+- Run your app on the iOS Simulator as much as you want
+- Install your app on your own physical iPhones and iPads
+- Use most Tauri plugins and system APIs that don't require special entitlements
+
+What it explicitly cannot do:
+
+- Submit to the App Store or TestFlight
+- Use capabilities that require entitlements (push notifications, iCloud, App Groups, Sign in with Apple, associated domains, Apple Pay, Background Modes limited set)
+- Distribute builds to anyone who isn't on your Apple ID
+
+## The 7-Day Provisioning Profile
+
+This is the headline limitation. A Personal Team provisioning profile expires **7 days** after it was created. When the profile expires, the app on your device just stops launching -- tapping the icon does nothing or shows a vague error.
+
+To keep the app working, you have to rebuild and redeploy from Xcode (or `cargo tauri ios dev`) which refreshes the profile for another 7 days.
+
+<Warning>
+
+This isn't a soft warning -- the app will simply stop working after 7 days until you redeploy. If you hand a dev build to a friend to test, plan for this.
+
+</Warning>
+
+### Other Quota Limits
+
+| Limit                                                 | Value            |
+| ----------------------------------------------------- | ---------------- |
+| Provisioning profile lifetime                         | 7 days           |
+| App IDs registerable at once with a Personal Team     | 10               |
+| Simultaneous devices per Apple ID                     | ~3 (enforced loosely) |
+| TestFlight availability                               | Not available    |
+| App Store availability                                | Not available    |
+
+Hit any of these and the workaround is to either delete old App IDs from the Apple Developer portal or upgrade to the paid program.
+
+## Configuring Tauri for a Personal Team
+
+Find your Team ID in Xcode:
+
+1. `Xcode` > `Settings` > `Accounts`
+2. Select your Apple ID
+3. Click `Manage Certificates` or the team row -- the 10-character `Team ID` is visible near your team name
+
+Set it in `tauri.conf.json`:
+
+```json
+{
+  "bundle": {
+    "iOS": {
+      "developmentTeam": "ABCD123456"
+    }
+  }
+}
+```
+
+Or via environment variable if you don't want to commit it:
+
+```bash
+export APPLE_DEVELOPMENT_TEAM=ABCD123456
+cargo tauri ios dev --host
+```
+
+Xcode will automatically generate and refresh the provisioning profile the first time you build.
+
+## Bundle Identifier Quirks
+
+With a free Personal Team, the bundle identifier (`tauri.conf.json > identifier`) must be globally unique to your Apple ID. Two gotchas to keep in mind:
+
+### Collisions With Yourself
+
+If you install `com.takazudo.myapp` as dev build 1, then change the code and try to reinstall as `com.takazudo.myapp` dev build 2, iOS usually handles this. But if you use the same identifier on multiple machines signed into the same Apple ID, the device can get confused about which provisioning profile to trust.
+
+Solution: keep a machine-specific prefix or suffix during experimentation, e.g. `com.takazudo.myapp.dev`.
+
+### Hyphens and Underscores
+
+As [noted in the project structure](./ios-project-structure.mdx#the-identifier-rule), older Tauri versions had bugs with `-` or `_` in the identifier. Stick to alphanumeric + dots until proven otherwise. `com.takazudo.myappdev` is safer than `com.takazudo.my-app-dev`.
+
+## Trusting the Developer on the Device
+
+The first time you install a free-team-signed build on a physical iPhone:
+
+1. Tap the installed app -- iOS refuses to launch it, showing "Untrusted Developer"
+2. On the iPhone: `Settings` > `General` > `VPN & Device Management`
+3. Find your developer entry (your Apple ID email)
+4. Tap `Trust "Apple Development: your@email.com"` > `Trust`
+5. Re-launch the app
+
+This trust persists per developer per device, so you only do it once per Apple ID per iPhone. But if you wipe the device or sign into iCloud differently, you'll redo it.
+
+## What's Blocked and What to Do About It
+
+| Capability                | Free Team | Paid Program | Workaround                                                                                                  |
+| ------------------------- | --------- | ------------ | ----------------------------------------------------------------------------------------------------------- |
+| Push notifications (APNs) | No        | Yes          | Poll from the frontend, use local notifications (don't require entitlement), or upgrade                     |
+| iCloud / CloudKit         | No        | Yes          | Use your own backend or a third-party sync layer                                                            |
+| App Groups                | No        | Yes          | Sharing data between app targets requires paid; skip extensions                                             |
+| Associated Domains        | No        | Yes          | Universal Links won't work; fall back to custom URL schemes                                                 |
+| Sign in with Apple        | No        | Yes          | Use OAuth with Google / GitHub instead until you upgrade                                                    |
+| In-App Purchase           | No        | Yes          | No IAP testing without the paid program                                                                     |
+| Local notifications       | Yes       | Yes          | Works fine with just the permission prompt                                                                  |
+| Camera / mic / photo library | Yes    | Yes          | Works fine; needs the usage-description keys in `Info.ios.plist`                                            |
+
+If you try to enable a blocked capability in the entitlements file, the build fails at sign time with `Provisioning profile "..." doesn't include the <Capability> entitlement`.
+
+## Upgrade Path to the Paid Program
+
+When you're ready to distribute beyond your own devices:
+
+1. Enroll at [developer.apple.com/programs](https://developer.apple.com/programs/) -- USD 99 / year, Apple verifies your identity (can take days for individuals, weeks for organizations needing a D-U-N-S number)
+2. Once approved, your Apple ID gains access to a real team (not "Personal Team")
+3. Update `tauri.conf.json > bundle > iOS > developmentTeam` with the new Team ID
+4. In the Apple Developer portal, register the bundle identifier as an App ID
+5. For App Store submission, follow [Tauri's App Store guide](https://v2.tauri.app/distribute/app-store/)
+6. Provisioning profiles now last 1 year instead of 7 days
+7. TestFlight becomes available for external beta testers
+
+Nothing in your Tauri code changes on upgrade; only the config and the Xcode team selection.
+
+## CI Signing (Paid Program Only)
+
+Once you have a paid team, CI signing is done via App Store Connect API keys and environment variables:
+
+| Env var               | Purpose                                          |
+| --------------------- | ------------------------------------------------ |
+| `APPLE_API_ISSUER`    | App Store Connect API Issuer ID                  |
+| `APPLE_API_KEY`       | App Store Connect API Key ID                     |
+| `APPLE_API_KEY_PATH`  | Path to the `.p8` private key file               |
+
+For manual signing (rarer with Tauri since Xcode automatic signing is usually enough), additional env vars carry base64-encoded certificate and provisioning profile data:
+
+- `IOS_CERTIFICATE`
+- `IOS_CERTIFICATE_PASSWORD`
+- `IOS_MOBILE_PROVISION`
+
+See Tauri's [iOS Code Signing docs](https://v2.tauri.app/distribute/sign/ios/) for the full procedure.
+
+## Common Pitfalls
+
+### App launches once then never again
+
+The provisioning profile expired. Redeploy from `cargo tauri ios dev` or Xcode to refresh for another 7 days.
+
+### `No profiles for 'com.takazudo.myapp' were found`
+
+Xcode couldn't generate a free-team profile. Usually because:
+
+- You're not signed into Xcode (`Xcode > Settings > Accounts`)
+- You hit the 10-App-ID limit (delete old ones from [developer.apple.com/account/resources/identifiers](https://developer.apple.com/account/resources/identifiers/list))
+- You tried to use a capability the free team doesn't allow -- remove it from the entitlements file
+
+### "Provisioning profile doesn't include the Push Notifications capability"
+
+You left the push entitlement in the entitlements file but the free team can't sign for push. Remove `aps-environment` from `gen/apple/<AppName>_iOS/<AppName>_iOS.entitlements`.
+
+### App works on simulator but fails on device
+
+The simulator doesn't enforce signing. Almost any code runs. The device does enforce signing, so this is where missing capabilities, expired profiles, and team mismatches surface.
+
+## Official Docs
+
+- [Tauri iOS Code Signing](https://v2.tauri.app/distribute/sign/ios/)
+- [Apple: Compare Memberships](https://developer.apple.com/support/compare-memberships/)
+- [Apple: Provisioning Profile Updates](https://developer.apple.com/help/account/provisioning-profiles/provisioning-profile-updates/)

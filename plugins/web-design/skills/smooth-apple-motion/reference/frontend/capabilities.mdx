@@ -1,0 +1,318 @@
+---
+title: Permissions and Capabilities
+description: Configure Tauri v2 capabilities to control what the frontend can access, including plugins and remote URLs.
+sidebar_position: 4
+---
+
+## What are capabilities?
+
+Tauri v2 uses a **capabilities** system to control what the frontend (webview) is allowed to do. Unlike Tauri v1, where all IPC commands were accessible by default, Tauri v2 requires explicit permission grants.
+
+Capabilities are defined in JSON files under the `capabilities/` directory in your Tauri project.
+
+## The default capability file
+
+A typical `capabilities/default.json`:
+
+```json
+{
+  "identifier": "default",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://localhost:*/**"]
+  },
+  "permissions": ["core:default", "dialog:default", "shell:default"]
+}
+```
+
+### `identifier`
+
+A unique name for this capability set. You can have multiple capability files for different security contexts.
+
+### `windows`
+
+Which windows this capability applies to. `["main"]` means only the window with label `"main"` gets these permissions. If you create additional windows (e.g., settings, about), you need to include their labels here or create separate capability files.
+
+### `remote`
+
+Controls which remote URLs can access the Tauri IPC bridge. This is critical for development:
+
+```json
+"remote": {
+  "urls": ["http://localhost:*/**"]
+}
+```
+
+This allows any localhost URL (any port, any path) to invoke Tauri commands. Without this, the Vite dev server would not be able to communicate with the Rust backend.
+
+<Note>
+
+In production, the frontend is loaded from `tauri://` URLs, which always have IPC access. The `remote` section is primarily for development with a local dev server.
+
+</Note>
+
+### `permissions`
+
+The list of permissions granted to the frontend. Each permission is scoped to a specific plugin or core feature.
+
+## Core permissions
+
+### `core:default`
+
+This is the baseline permission that enables fundamental Tauri functionality:
+
+- IPC command invocation (for commands registered in `generate_handler!`)
+- Event system (`emit`, `listen`)
+- Window management basics
+
+Without `core:default`, the frontend cannot call any Tauri commands at all.
+
+## Plugin permissions
+
+Each Tauri plugin defines its own permission scopes. You must explicitly grant them.
+
+### `dialog:default`
+
+Enables native dialog APIs (file picker, folder picker, message boxes):
+
+```rust
+// Rust side: requires dialog plugin
+app.dialog().file().blocking_pick_folder()
+```
+
+```tsx
+// Frontend side: requires dialog:default permission
+import { open } from "@tauri-apps/plugin-dialog";
+const selected = await open({ directory: true });
+```
+
+Requires the plugin to be registered:
+
+```rust
+tauri::Builder::default()
+    .plugin(tauri_plugin_dialog::init())
+```
+
+### `shell:default`
+
+Enables shell operations like opening URLs in the default browser:
+
+```rust
+// Rust side: requires shell plugin
+tauri::Builder::default()
+    .plugin(tauri_plugin_shell::init())
+```
+
+```tsx
+// Frontend side: requires shell:default permission
+import { open } from "@tauri-apps/plugin-shell";
+await open("https://example.com");
+```
+
+<Warning>
+
+The `shell:default` permission allows the frontend to open URLs and execute shell commands. In security-sensitive applications, consider using more restrictive shell permissions instead of `default`.
+
+</Warning>
+
+## Adding new permissions
+
+When you add a new Tauri plugin, you must:
+
+1. Add the plugin to `Cargo.toml`
+2. Register it in `main.rs` with `.plugin()`
+3. Add its permission to `capabilities/default.json`
+
+For example, adding the clipboard plugin:
+
+```json
+{
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "shell:default",
+    "clipboard-manager:default"
+  ]
+}
+```
+
+<Info>
+
+If you add a plugin but forget to add its permission, frontend calls to that plugin's API will fail silently or throw a permission error at runtime. There is no compile-time check.
+
+</Info>
+
+## Security: CSP configuration
+
+Tauri v2 supports Content Security Policy (CSP) headers to restrict what the webview can load. In `tauri.conf.json`:
+
+```json
+{
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'"
+    }
+  }
+}
+```
+
+Setting CSP to `null` disables all CSP restrictions:
+
+```json
+{
+  "app": {
+    "security": {
+      "csp": null
+    }
+  }
+}
+```
+
+<Warning>
+
+Setting `"csp": null` disables Content Security Policy entirely. This means the webview can load scripts, styles, and resources from any origin. Only do this if you understand the security implications and your app does not handle sensitive data.
+
+</Warning>
+
+In development, a relaxed CSP is often necessary because the Vite dev server injects hot-reload scripts. In production, you should configure a strict CSP.
+
+## Multiple capability files
+
+You can create separate capability files for different security contexts:
+
+```
+capabilities/
+  default.json      # Main window permissions
+  settings.json     # Settings window (restricted)
+```
+
+```json
+// capabilities/settings.json
+{
+  "identifier": "settings",
+  "windows": ["settings"],
+  "permissions": ["core:default"]
+}
+```
+
+This gives the settings window only core permissions, without access to dialog, shell, or other plugins.
+
+## Platform-scoped capabilities
+
+A capability file can scope itself to specific platforms with a `"platforms"` field. This lets a single project grant different permissions on desktop versus mobile, where the available native APIs differ.
+
+```json
+// capabilities/default.json — desktop
+{
+  "identifier": "default",
+  "platforms": ["macOS", "windows", "linux"],
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://localhost:*/**"]
+  },
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "shell:default",
+    "haptics:default",
+    "notification:default"
+  ]
+}
+```
+
+```json
+// capabilities/ios.json — iOS
+{
+  "identifier": "ios",
+  "platforms": ["iOS"],
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:default"]
+}
+```
+
+```json
+// capabilities/android.json — Android
+{
+  "identifier": "android",
+  "platforms": ["android"],
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:default"]
+}
+```
+
+The desktop file grants `shell:default`, `haptics:default`, and `notification:default` plus `remote.urls` for the dev server. The `ios.json` file **deliberately omits `shell:default`**: iOS has no process-spawning or PTY API inside its sandbox, so a shell permission there would grant access to a capability that cannot exist.
+
+`haptics:default` and `notification:default` appear in the desktop file too because those plugins are registered on every platform. On desktop the haptic calls are simply silent no-ops -- there is no haptic hardware -- but the permission must still be granted, or the IPC call would be rejected at the capability layer.
+
+### Defense in depth: two layers that must agree
+
+Dropping `shell:default` from the iOS capability is only half of the story. The Rust side does the same thing at compile time, and the two layers must agree.
+
+```rust
+// main.rs — the shell plugin is not even compiled on iOS
+let builder = tauri::Builder::default()
+    .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_haptics::init())
+    .plugin(tauri_plugin_notification::init());
+
+// No PTY / process-spawning API exists in the iOS sandbox, so the
+// shell plugin is excluded from the build entirely on that target.
+#[cfg(not(target_os = "ios"))]
+let builder = builder.plugin(tauri_plugin_shell::init());
+```
+
+- **Layer 1 (capability):** `ios.json` omits `shell:default`, so the Tauri permission system blocks shell calls at the capability level.
+- **Layer 2 (Rust build):** `#[cfg(not(target_os = "ios"))]` keeps the shell plugin out of the iOS binary, so there is nothing to call even if a permission slipped through.
+
+Leaving `shell` in either layer alone is a footgun: a permission with no plugin behind it, or a plugin with no permission gating it. Keeping both layers consistent means a shell command on iOS fails the same way regardless of which check you forget.
+
+### `#[cfg]` inside `generate_handler!`
+
+The same `#[cfg(...)]` attributes work *inside* the `tauri::generate_handler!` macro, letting you drop individual commands per-platform. This is non-obvious but legal: the macro expands the attribute on each entry, so the excluded commands are never registered on the target where they cannot run.
+
+```rust
+.invoke_handler(tauri::generate_handler![
+    commands::files::messages_list,
+    commands::settings::settings_get,
+    // ...other cross-platform commands...
+
+    // Build-pipeline commands spawn subprocesses, so they are not
+    // compiled on iOS — the attribute drops them from the handler list.
+    #[cfg(not(target_os = "ios"))]
+    commands::builder::generator_build_and_install,
+    #[cfg(not(target_os = "ios"))]
+    commands::builder::generator_cancel_build,
+    #[cfg(not(target_os = "ios"))]
+    commands::builder::generator_check_toolchain,
+])
+```
+
+On iOS, these commands do not exist in the handler at all — calling them from the frontend fails with a "command not found" error rather than running shell-backed code that has no business existing on the platform.
+
+## Troubleshooting
+
+### "IPC call failed" or "Permission denied"
+
+- Check that the command is listed in `generate_handler!`
+- Check that `core:default` is in the permissions list
+- Check that the window label matches the `windows` array in the capability file
+
+### "Plugin not found" or "Feature not available"
+
+- Check that the plugin is registered with `.plugin()` in `main.rs`
+- Check that the plugin's permission is in `capabilities/default.json`
+- Check that the plugin's npm package is installed for frontend APIs
+
+### Dev server cannot call Tauri commands
+
+- Check that the `remote.urls` array includes the dev server's URL pattern
+- The pattern `"http://localhost:*/**"` covers any port on localhost
+
+## Key takeaways
+
+1. **`core:default` is required** -- without it, no IPC commands work
+2. **Each plugin needs its own permission** -- `dialog:default`, `shell:default`, etc.
+3. **Remote URLs need explicit allowlisting** -- required for dev server IPC access
+4. **Window labels must match** -- the capability's `windows` array must include the window label
+5. **No compile-time checks** -- missing permissions fail silently or at runtime
+6. **Use strict CSP in production** -- avoid `"csp": null` outside of development

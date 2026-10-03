@@ -1,0 +1,51 @@
+---
+title: Real-World Recipes
+description: Patterns and architectures from production Tauri apps
+sidebar_position: 1
+---
+
+# Real-World Recipes
+
+This section contains architecture walkthroughs and patterns extracted from production Tauri apps. These are not minimal "hello world" examples -- they cover the real complexity you encounter when building apps that people use daily.
+
+## Why Recipes
+
+Tauri's official documentation covers the API surface well, but it does not show you how a complete app fits together. When you need to spawn a dev server, manage process lifecycle, handle multiple window types, or build app variants from shared code, you are mostly on your own.
+
+These recipes fill that gap by documenting actual patterns from working applications, with full context on why each decision was made.
+
+## Available Recipes
+
+### [Doc Viewer App](./doc-viewer-app)
+
+A lightweight Tauri wrapper around a `pnpm dev` server. This is the simplest useful pattern: the Rust side spawns a Node.js dev server, shows a loading screen while it starts, and navigates the webview once the server is ready. Covers process lifecycle, port cleanup, and zoom menu items.
+
+**Best for:** wrapping existing web apps or documentation sites in a native window.
+
+### [Text Editor App](./text-editor-app)
+
+A full-featured text editor with a Vite + React frontend and extensive Rust IPC. Covers `AppState` management with multiple Mutex fields, file watchers for external changes, splash screen flow, HTTP REST server for dev mode, macOS press-and-hold suppression, and plugin usage.
+
+**Best for:** apps with rich Rust-JavaScript interop and complex state management.
+
+### [Multi-Config](./multi-config)
+
+Building multiple app variants (different names, identifiers, icons) from the same codebase using overlaid `tauri.conf.json` files. A single `cargo tauri build --config` flag produces a completely different app.
+
+**Best for:** shipping the same core functionality under different brands or for different use cases.
+
+### [Image Viewer App](./image-viewer-app)
+
+The image pipeline of a Tauri-based image viewer: HEIC decoding via `sips`/`heif-convert` fallback chain, efficient full-size delivery through the asset protocol, and a two-tier thumbnail cache (in-memory LRU + on-disk persistence). Covers the hard-won details that are easy to get subtly wrong.
+
+**Best for:** apps that display user-selected images and need fast thumbnails without round-tripping large files through IPC as base64.
+
+## Common Themes
+
+Across these recipes, several patterns appear repeatedly:
+
+- **Process groups** -- Always spawn sidecars in their own process group so you can kill them cleanly
+- **Port cleanup on startup** -- Kill stale processes on your port before starting a new server
+- **Loading/splash screens** -- Show something immediately; users tolerate loading bars but not frozen windows
+- **`cfg!(debug_assertions)`** -- The standard way to branch between dev and production behavior in Rust
+- **Hardcoded paths with fallback** -- For finding system binaries like `pnpm` or `node`, check well-known paths first, then fall back to `which`

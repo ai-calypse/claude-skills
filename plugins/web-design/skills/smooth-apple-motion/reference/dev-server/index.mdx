@@ -1,0 +1,67 @@
+---
+title: Dev Server Integration
+description: How Tauri connects to your frontend dev server during development
+sidebar_position: 1
+---
+
+# Dev Server Integration
+
+During development, Tauri loads your frontend from a local dev server rather than from bundled static files. This is a fundamental part of the Tauri development experience -- it gives you hot reloading, fast iteration, and the same browser DevTools you are used to.
+
+## How It Works
+
+Tauri's dev workflow relies on two configuration fields in `tauri.conf.json`:
+
+- **`beforeDevCommand`** -- a shell command Tauri runs before starting the Rust backend (typically your dev server start command)
+- **`devUrl`** -- the URL Tauri's webview loads during development
+
+```json
+{
+  "build": {
+    "beforeDevCommand": "pnpm exec vite --config vite.config.ts",
+    "devUrl": "http://localhost:37461"
+  }
+}
+```
+
+When you run `cargo tauri dev`, Tauri:
+
+1. Executes `beforeDevCommand` in a subprocess
+2. Waits for the dev server to become available
+3. Starts the Rust backend
+4. Opens a webview window pointed at `devUrl`
+
+## Topics in This Section
+
+This section covers practical patterns and pitfalls for dev server integration:
+
+- **[Vite Integration](./vite-integration)** -- Configuring Vite as your frontend dev server, including CWD gotchas and multi-config setups
+- **[SSE Live Reload](./sse-live-reload)** -- Building a custom SSE-based live-reload system for dev servers that do full rebuilds instead of HMR
+- **[Watcher Loops](./watcher-loops)** -- Preventing infinite rebuild loops when your build writes to watched directories
+
+## Dev vs Production
+
+The key architectural difference:
+
+| Aspect | Development | Production |
+|--------|------------|------------|
+| Frontend source | Dev server (`devUrl`) | Bundled files (`frontendDist`) |
+| Reload behavior | HMR or live reload | Static |
+| Rust config | `cfg!(debug_assertions)` is `true` | `cfg!(debug_assertions)` is `false` |
+| Build command | `beforeDevCommand` | `beforeBuildCommand` |
+
+<Tip>
+
+Use `cfg!(debug_assertions)` in your Rust code to detect dev mode. This is a compile-time constant, so the dead branch is eliminated entirely -- no runtime cost.
+
+</Tip>
+
+```rust
+const IS_DEV: bool = cfg!(debug_assertions);
+
+if IS_DEV {
+    // Dev server is already running via beforeDevCommand
+} else {
+    // Production: spawn your own server or use bundled assets
+}
+```

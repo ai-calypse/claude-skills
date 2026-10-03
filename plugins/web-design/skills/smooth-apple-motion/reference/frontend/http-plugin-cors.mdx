@@ -1,0 +1,104 @@
+---
+title: Bypassing CORS with plugin-http
+description: Use @tauri-apps/plugin-http to call third-party REST APIs from the WebView without hitting CORS restrictions.
+sidebar_position: 11
+---
+
+## The CORS problem in a WebView
+
+The frontend of a Tauri app runs inside a system WebView, and a plain browser `fetch` there behaves like any other browser request: it is subject to **CORS** (Cross-Origin Resource Sharing). When you call a public REST API that does not return the right `Access-Control-Allow-Origin` headers, the WebView blocks the response and your `fetch` rejects.
+
+This is not a bug you can fix from the frontend. CORS is enforced by the WebView's network layer, and the server, not your app, decides which origins it allows. Many useful public APIs (exchange rates, weather, geocoding) simply do not send CORS headers, because they were designed for server-to-server use.
+
+## `@tauri-apps/plugin-http` bypasses CORS
+
+`@tauri-apps/plugin-http` exposes a `fetch` function whose API mirrors the browser's `fetch`, but the request is **not made by the WebView**. It is forwarded to the Rust side and executed by [`reqwest`](https://docs.rs/reqwest/), a native HTTP client. Since the request never originates from a browser context, there is no CORS preflight and no `Access-Control-Allow-Origin` check.
+
+```tsx
+import { fetch } from "@tauri-apps/plugin-http";
+
+interface ExchangeResponse {
+  rates: Record<string, number>;
+  date: string;
+}
+
+async function fetchRate(): Promise<{ rate: number; date: string }> {
+  const response = await fetch("https://api.exchangerate-api.com/v4/latest/EUR");
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = (await response.json()) as ExchangeResponse;
+  const rate = data.rates["JPY"];
+  if (!rate) throw new Error("JPY rate not found in response");
+  return { rate, date: data.date };
+}
+```
+
+The only change from a browser `fetch` is the import line. `response.ok`, `response.status`, `response.json()`, request options like `method`, `headers`, and `body` all work the same way.
+
+<Note>
+
+Because the import shadows the global `fetch`, it is easy to forget which one you are calling. Keep the `import { fetch } from "@tauri-apps/plugin-http"` at the top of any module that needs the CORS-free path, and let plain browser `fetch` remain for same-origin requests.
+
+</Note>
+
+## The cost: you must allowlist it
+
+Bypassing CORS is a capability, so Tauri makes you grant it explicitly. Three pieces must line up.
+
+Register the plugin in `main.rs`:
+
+```rust
+tauri::Builder::default()
+    .plugin(tauri_plugin_http::init())
+```
+
+Add the permission to `capabilities/default.json`:
+
+```json
+{
+  "identifier": "default",
+  "windows": ["*"],
+  "permissions": ["core:default", "http:default"]
+}
+```
+
+And install the npm package for the frontend API:
+
+```bash
+pnpm add @tauri-apps/plugin-http
+```
+
+`http:default` allows requests to any URL. For a tighter security posture, scope the permission to the exact hosts you call instead of granting blanket access:
+
+```json
+{
+  "identifier": "default",
+  "windows": ["*"],
+  "permissions": [
+    "core:default",
+    {
+      "identifier": "http:default",
+      "allow": [{ "url": "https://api.exchangerate-api.com/*" }]
+    }
+  ]
+}
+```
+
+<Warning>
+
+`http:default` with no scope lets the frontend reach any host on the internet through the Rust backend. If the API surface is known, restrict it with an `allow` list so a compromised frontend cannot exfiltrate data to arbitrary endpoints.
+
+</Warning>
+
+## When to reach for it
+
+Use `plugin-http` whenever a desktop app needs to call a third-party REST API directly from the frontend and that API does not send CORS headers. A currency or exchange-rate lookup is a typical case: the app fetches the latest rate from a public endpoint, with no backend of its own to proxy through.
+
+If you control the server, adding CORS headers there is the cleaner fix. `plugin-http` is for the common situation where you do not.
+
+## Key takeaways
+
+1. **Browser `fetch` in the WebView obeys CORS** -- a public API without CORS headers gets blocked.
+2. **`plugin-http`'s `fetch` runs through Rust (`reqwest`)** -- no browser origin, so no CORS check.
+3. **The API mirrors `fetch`** -- only the import line changes.
+4. **You must allowlist it** -- register the plugin, add `http:default`, install the npm package.
+5. **Scope the URLs when you can** -- prefer an `allow` list over blanket access.

@@ -1,0 +1,216 @@
+---
+title: Shared Packages Overview
+description: An overview of the 16+ shared packages that make up the zudo-text monorepo ecosystem
+sidebar_position: 6
+---
+
+# Shared Packages Overview
+
+The zudo-text monorepo contains 16 shared packages under the `@takazudo/` scope. All are private workspace dependencies -- not published to npm. They use tsup for building and vitest for testing. Each package exports from `src/index.ts` with dual ESM/CJS exports.
+
+This article groups the packages by purpose and describes what each one does, serving as a roadmap for developers navigating the codebase.
+
+## Configuration and Scaffolding
+
+### @takazudo/app-defaults
+
+The central configuration package. Defines the `AppSettings` TypeScript type, all default values, and the `validateSettings()` function. Every consumer that reads or writes settings depends on this package.
+
+**Key exports:**
+
+- `AppSettings` type -- Full settings schema (general, editor, vim, terminal, shortcuts, layout, sync)
+- `defaultSettings` -- Sensible defaults for all fields
+- `validateSettings(unknown)` -- Type-checks, range-validates, and migrates legacy field names
+- `VALID_DISPLAY_SCALES` -- Discrete display scale steps (0.75 to 2.0)
+
+**Used by:** Backend bridge (mock adapter defaults), app scaffold (workspace generation), Tauri frontend (settings dialog)
+
+### @takazudo/app-scaffold
+
+Generates complete app workspaces from presets. Creates directory structures, writes settings files, and copies template files.
+
+**Key exports:**
+
+- `scaffoldApp(config)` -- Creates a workspace directory with all required files
+- `getPreset(name)` -- Returns a preset configuration (minimal, standard, full)
+- `ScaffoldResult` -- Includes `cleanup()` for test teardown
+
+**Presets:** `minimal` (bare workspace), `standard` (with skills pin), `full` (with skills and notes pins)
+
+## Backend Communication
+
+### @takazudo/backend-bridge
+
+The abstraction layer between the React frontend and the Rust backend. Defines the `BackendAPI` interface and provides three adapter implementations.
+
+**Key exports:**
+
+- `BackendAPI` interface -- All backend operations (messages, pins, drafts, terminal, settings, sync, auth)
+- `initBackend(adapter)` / `getBackend()` -- Singleton initialization and access
+- `createMockAdapter()` -- In-memory implementation for development and testing
+- `createRestAdapter()` -- HTTP/SSE implementation for hybrid development
+- `createTauriAdapter()` -- Native IPC implementation (in Tauri adapter file, imported separately)
+
+**Three modes:** `pnpm tauri:dev` (TauriAdapter), `pnpm dev:mock` (MockAdapter), `pnpm dev:rest` (RestAdapter)
+
+### @takazudo/sync-client
+
+Cloud vault sync client with manifest-based diffing and conflict resolution. Standalone -- no Tauri dependency.
+
+**Purpose:** Synchronize workspace files between devices via a cloud vault server. Compares local and remote manifests, uploads/downloads changed files, and handles conflicts.
+
+## UI Components
+
+### @takazudo/ui-components
+
+Shared React components used across the app. Includes both primitive UI elements and composite components.
+
+**Components include:** Icons, Toast notifications, TabBar, PanelDivider (drag-to-resize), PageLayout, SidebarItem, Dialog, and more.
+
+**Development:** Has Storybook stories and vitest tests. Run `pnpm storybook` to browse components.
+
+### @takazudo/command-palette
+
+Command palette UI component. Provides a searchable, keyboard-navigable overlay for executing app commands.
+
+**Features:** Fuzzy search, keyboard navigation, command grouping, shortcut display.
+
+### @takazudo/color-themes
+
+Color theme definitions and CSS variable generation. Implements the two-tier color system: 16-color palette (Tier 1) to semantic tokens (Tier 2).
+
+**Key exports:**
+
+- `colorSchemes` -- 10 built-in color schemes (dark and light)
+- `applyTheme(name)` -- Sets `--palette-*` CSS custom properties
+- `applyColors(settings)` -- Sets `--theme-*` semantic CSS custom properties
+- `toXtermTheme(scheme)` -- Converts a scheme to xterm's `ITheme` format
+- `schemaToColors(scheme)` -- Derives semantic `ColorSettings` from a `ColorScheme`
+
+## Content Management
+
+### @takazudo/kanban-board
+
+Kanban board UI component with swimlanes, grid view, filters, and inline editing. Used for project management within the app.
+
+**Features:** Drag-and-drop cards, swimlane layout, grid view toggle, inline card editing, keyboard shortcuts (H/J/K/L navigation), filter by label or status.
+
+### @takazudo/kanban-parser
+
+Markdown-based kanban data parser and serializer. Converts between a structured kanban data model and a markdown text format.
+
+**Purpose:** Kanban boards are stored as markdown files. This parser reads the markdown into a structured model for the kanban board component, and serializes changes back to markdown.
+
+### @takazudo/todo-board
+
+Todo board UI component. Similar to kanban but focused on simple task management.
+
+### @takazudo/todo-parser
+
+Markdown-based todo data parser and serializer. Parses checkbox-style markdown into structured todo items.
+
+## Editor Utilities
+
+### @takazudo/code-block
+
+Markdown code block rendering with a copy button. Used in the markdown preview pane to render fenced code blocks with syntax highlighting and a one-click copy feature.
+
+### @takazudo/find-in-page
+
+DOM-based text search for the markdown preview pane. Highlights matches in the rendered HTML output.
+
+**Note:** This is not browser Ctrl+F -- it searches within the app's preview pane DOM, which is a subset of the page.
+
+## Input and Navigation
+
+### @takazudo/shortcut-engine
+
+Keyboard shortcut engine with chord support. Manages keyboard shortcut registration, conflict detection, and execution.
+
+**Features:** Single-key and chord (multi-key sequence) shortcuts, modifier key support (Mod/Ctrl/Alt/Shift), configurable bindings via settings, conflict detection.
+
+## File System Utilities
+
+### @takazudo/file-utils
+
+File system utilities shared between the backend bridge and other consumers.
+
+**Key exports:**
+
+- `parseFrontmatter(content)` -- Extracts YAML frontmatter and body from markdown
+- `generateFilename(name)` -- Creates date-prefixed slug filenames (e.g., `20240101-my-note.md`)
+- `extractDateFromFilename(filename)` -- Parses the date prefix from a filename
+- `makeSlug(text)` -- Converts text to URL-safe slugs
+- `nowIsoLocal()` -- Returns current timestamp in local ISO format
+
+## CSS Development
+
+### @takazudo/css-playground
+
+CSS playground dev tool. A standalone environment for experimenting with CSS styles, themes, and component layouts.
+
+**Usage:** `pnpm playground` (local) or `pnpm playground:net` (LAN-accessible)
+
+## Package Conventions
+
+All packages follow consistent patterns:
+
+```
+packages/<name>/
+  src/
+    index.ts          # Main export
+    *.ts              # Source files
+    *.test.ts         # Tests (co-located)
+  package.json
+  tsconfig.json
+  tsup.config.ts      # Build configuration
+```
+
+**Dual exports:** `import` resolves to source (`./src/index.ts` for development), `require` resolves to built (`./dist/index.js`).
+
+**Inter-package dependencies:** Use `workspace:*` protocol:
+
+```json
+{
+  "dependencies": {
+    "@takazudo/app-defaults": "workspace:*",
+    "@takazudo/file-utils": "workspace:*"
+  }
+}
+```
+
+**Testing:** All packages are tested with a single command:
+
+```bash
+# Run all package tests
+pnpm --filter "@takazudo/*" test
+
+# Run a specific package
+pnpm --filter @takazudo/app-defaults test
+```
+
+## Dependency Graph (Simplified)
+
+```
+app-defaults ─────────────┬──── color-themes
+                          │
+backend-bridge ───────────┼──── file-utils
+                          │
+app-scaffold ─────────────┘
+
+ui-components ────────────── (standalone)
+command-palette ──────────── (standalone)
+shortcut-engine ──────────── (standalone)
+kanban-board ─────────────── kanban-parser
+todo-board ───────────────── todo-parser
+code-block ───────────────── (standalone)
+find-in-page ─────────────── (standalone)
+sync-client ──────────────── (standalone)
+css-playground ───────────── color-themes
+```
+
+The `app-defaults` and `color-themes` packages are at the center of the dependency graph. Changes to these packages affect many consumers and should be tested thoroughly.
+
+## Key Takeaway
+
+The package ecosystem follows a clear separation of concerns: configuration is centralized in `app-defaults`, backend communication is abstracted in `backend-bridge`, UI components are reusable in `ui-components`, and domain-specific logic (kanban, sync, shortcuts) lives in dedicated packages. This structure enables independent development and testing of each concern.

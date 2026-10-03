@@ -1,0 +1,245 @@
+---
+title: Vite Integration
+description: Configuring Vite as your Tauri frontend dev server and build tool
+sidebar_position: 2
+---
+
+# Vite Integration
+
+Vite is the most common frontend tooling for Tauri apps. It provides HMR during development and optimized bundling for production. The integration is configured entirely through `tauri.conf.json`.
+
+## Configuration Fields
+
+Four fields in `tauri.conf.json` control the Vite integration:
+
+```json
+{
+  "build": {
+    "beforeDevCommand": "pnpm exec vite --config vite.config.ts",
+    "beforeBuildCommand": "pnpm exec vite build --config vite.config.ts",
+    "devUrl": "http://localhost:37461",
+    "frontendDist": "./dist-renderer"
+  }
+}
+```
+
+### beforeDevCommand
+
+The command Tauri runs before starting the Rust backend in dev mode (`cargo tauri dev`). For Vite, this starts the Vite dev server.
+
+```json
+"beforeDevCommand": "pnpm exec vite --config vite.config.ts"
+```
+
+### beforeBuildCommand
+
+The command Tauri runs before building the production app (`cargo tauri build`). For Vite, this runs the production build.
+
+```json
+"beforeBuildCommand": "pnpm exec vite build --config vite.config.ts"
+```
+
+### devUrl
+
+The URL that Tauri's webview loads during development. This must match the port Vite is listening on.
+
+```json
+"devUrl": "http://localhost:37461"
+```
+
+### frontendDist
+
+The directory containing the built frontend assets for production. This is the Vite build output directory. The path is relative to the `tauri.conf.json` file.
+
+```json
+"frontendDist": "./dist-renderer"
+```
+
+## Critical: beforeDevCommand CWD
+
+<Warning>
+
+**`beforeDevCommand` runs with its working directory set to the repository root, NOT the directory containing `tauri.conf.json`.**
+
+This is the single most confusing aspect of Tauri's dev server integration. If your `tauri.conf.json` is in `tauri-app/` and your `vite.config.ts` is also in `tauri-app/`, you might expect `beforeDevCommand` to run from `tauri-app/`. It does not. It runs from the repo root.
+
+</Warning>
+
+This means if your project structure is:
+
+```
+my-app/                    <-- beforeDevCommand runs HERE
+  tauri-app/
+    tauri.conf.json
+    vite.config.ts
+    src/
+    dist-renderer/
+```
+
+Your `beforeDevCommand` needs to account for this. There are two approaches:
+
+### Approach 1: Use `cd` in the Command
+
+For apps where the dev command needs to run from a different directory:
+
+```json
+{
+  "build": {
+    "beforeDevCommand": "cd ../../doc && pnpm dev",
+    "devUrl": "http://localhost:32342/"
+  }
+}
+```
+
+This pattern is common when the Tauri app wraps a dev server that lives elsewhere in the monorepo. For example, from a real production config where the Tauri app wraps a documentation site:
+
+```json
+{
+  "productName": "zmod doc",
+  "build": {
+    "frontendDist": "./frontend",
+    "beforeDevCommand": "cd ../../doc && pnpm dev",
+    "devUrl": "http://localhost:32342/"
+  }
+}
+```
+
+Another example wrapping a preview server:
+
+```json
+{
+  "productName": "zmdpreview",
+  "build": {
+    "frontendDist": "./frontend",
+    "beforeDevCommand": "cd ../../sub-packages/zmdpreview && pnpm dev",
+    "devUrl": "http://localhost:14188/"
+  }
+}
+```
+
+### Approach 2: Specify Config Path
+
+When Vite is in the same directory as `tauri.conf.json`, use the `--config` flag to specify the full path:
+
+```json
+{
+  "build": {
+    "beforeDevCommand": "pnpm exec vite --config vite.config.ts",
+    "beforeBuildCommand": "pnpm exec vite build --config vite.config.ts",
+    "devUrl": "http://localhost:37461",
+    "frontendDist": "./dist-renderer"
+  }
+}
+```
+
+<Note>
+
+The `--config` flag with a relative path works because `pnpm exec` resolves it relative to the package root, not the shell CWD. If you use `npx` or call `vite` directly, you may need to adjust the path.
+
+</Note>
+
+## frontendDist in Production
+
+The `frontendDist` path is relative to the `tauri.conf.json` file (unlike `beforeDevCommand`). Tauri embeds these files into the binary at build time using `tauri::generate_context!()`.
+
+```
+tauri-app/
+  tauri.conf.json         <-- frontendDist is relative to this
+  dist-renderer/          <-- "./dist-renderer"
+    index.html
+    assets/
+      main-abc123.js
+      style-def456.css
+```
+
+For apps that do not bundle frontend assets (because they spawn their own server), `frontendDist` points to a minimal directory with just a loading page:
+
+```json
+{
+  "build": {
+    "frontendDist": "./frontend"
+  }
+}
+```
+
+```
+tauri-app/
+  frontend/
+    index.html            <-- Simple loading/splash page
+```
+
+## Multiple Vite Config Files
+
+You might need different Vite configurations for different scenarios:
+
+```
+tauri-app/
+  vite.config.ts              <-- Main config
+  vite.config.ztoffice.ts     <-- Variant config
+```
+
+Reference the specific config in `tauri.conf.json`:
+
+```json
+"beforeDevCommand": "pnpm exec vite --config vite.config.ts"
+```
+
+Or for the variant:
+
+```json
+"beforeDevCommand": "pnpm exec vite --config vite.config.ztoffice.ts"
+```
+
+This is useful when building multiple app variants from the same codebase (see [Multi-Config](../recipes/multi-config) for the full pattern).
+
+## Common Pitfalls
+
+### Port Conflicts
+
+Hardcode the Vite port in your `vite.config.ts` to match `devUrl`. If you let Vite pick a random port, the webview will not connect.
+
+```typescript
+// vite.config.ts
+export default defineConfig({
+  server: {
+    port: 37461,
+    strictPort: true, // Fail if port is taken, don't auto-increment
+  },
+});
+```
+
+<Tip>
+
+Always set `strictPort: true` in your Vite config. Without it, if port 37461 is taken, Vite silently uses 37462 -- and your Tauri webview stares at a blank page because it is still trying to connect to 37461.
+
+</Tip>
+
+### CSP Configuration
+
+Tauri's default Content Security Policy (CSP) blocks connections to `localhost`. For Vite's HMR WebSocket to work, you need to either relax or disable CSP in development:
+
+```json
+{
+  "app": {
+    "security": {
+      "csp": null
+    }
+  }
+}
+```
+
+Setting `csp` to `null` disables CSP entirely. This is fine for development but you should configure a proper CSP for production if your app handles sensitive data.
+
+### Empty Windows Array
+
+When you create windows programmatically in Rust (which is common for apps with splash screens or custom window behavior), leave the `windows` array empty:
+
+```json
+{
+  "app": {
+    "windows": []
+  }
+}
+```
+
+This tells Tauri not to create any windows automatically -- your Rust code is responsible for creating them.

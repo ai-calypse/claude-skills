@@ -1,0 +1,94 @@
+---
+title: iOS Input Auto-Zoom on Focus
+description: Why WKWebView zooms into inputs under 16px and how to prevent it without disabling pinch-zoom
+sidebar_position: 8
+---
+
+## The Problem
+
+On iOS Safari and `WKWebView`, focusing an input field auto-zooms the viewport if the input's rendered font size is below 16px. This applies to plain `<input>` and `<textarea>`, and also to editor surfaces that end up as `contenteditable` underneath -- CodeMirror, ProseMirror, Slate, and similar. Tap the input, the viewport zooms in. Blur the input, the viewport stays zoomed. The user is now looking at a cropped page until they pinch-zoom back out.
+
+This hits both real Tauri iOS apps (which are `WKWebView` under the hood) and any web build of the same frontend viewed on an iPhone -- including Cloudflare Pages preview URLs, Netlify previews, and anywhere else you push the same `dist/` for review.
+
+## Why 16px
+
+Apple's heuristic: any input rendering smaller than 16px is assumed too small to read, so iOS auto-zooms on focus as an accessibility measure. The threshold is the *computed rendered font size after all transforms and scaling*, not just the value declared in CSS. A `font-size: 16px` element wrapped in `transform: scale(0.9)` renders at 14.4px and still triggers the zoom.
+
+The behavior is iOS-only. macOS Safari does not do it. WebKit on other platforms (e.g. Linux GTK WebKit) does not do it either. This makes the bug invisible during most of a desktop-first app's development.
+
+## Where It Hurts in Tauri Apps
+
+A Tauri iOS app is a `WKWebView`, so the same 16px rule applies. Desktop-first apps often default to editor fonts in the 13-14px range -- terminal output, CodeMirror, small form inputs, inline rename fields. On iPad and iPhone, all of those focus-zoom.
+
+The same frontend bundle deployed to a public web preview (e.g. a Cloudflare Pages preview of the `dist/` output) hits the same problem when reviewers open the link on their phone. "The preview is broken on iPhone" is a common symptom that boils down to this one rule.
+
+## Fix Options
+
+Listed in order of recommendation.
+
+### Option A: Bump Editor and Input Font-Size to at Least 16px on Coarse Pointers
+
+The cleanest fix. Use a `@media (pointer: coarse)` query so desktop users keep the smaller size they prefer, and touch devices get the 16px minimum that suppresses the zoom.
+
+```css
+@media (pointer: coarse) {
+  .cm-content,
+  .cm-scroller {
+    font-size: 16px;
+  }
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}
+```
+
+This preserves pinch-zoom for accessibility, which matters for WCAG 2.1 1.4.4 (Resize Text) compliance. Only the affected inputs change size, not the rest of the layout.
+
+### Option B: Lift the App's Global Display Scale on Mobile
+
+If the app already has a `--display-scale` system (see [Display Scale System](../recipes/display-scale-system.mdx)), another angle is to detect coarse pointers once at startup and suggest a scale that pushes the editor over 16px. A 14px base font at `--display-scale: 1.25` renders at 17.5px, which is safely above the threshold.
+
+Don't silently override a user preference. Show a one-time notice in settings -- something like "Touch device detected. Use 125% display scale for readability?" with a "Use 125%" button -- and remember the user's answer. This pairs well with Option A as defense in depth: Option A protects inputs that were somehow missed, Option B raises the whole UI to a phone-appropriate scale.
+
+### Option C: CSS `scale()` With Negative Margins
+
+Pixel-perfect but fragile. Declare `font-size: 16px` on the input so iOS is happy, then visually shrink it with `transform: scale(0.875)` and compensating negative margins so the surrounding layout still looks right.
+
+This breaks down with CodeMirror and other editors that measure cell widths from the unscaled box. Cursor position, selection rectangles, and gutter alignment all end up off by the scale factor. Avoid unless the input in question is a plain single-line field with no measurement dependencies.
+
+### Option D: Disable Pinch-Zoom via Viewport Meta
+
+```html
+<meta
+  name="viewport"
+  content="width=device-width, initial-scale=1, maximum-scale=1.0, user-scalable=no"
+/>
+```
+
+This kills the auto-zoom because there is no zoom allowed to begin with. It also kills the user's ability to pinch-zoom for any reason, which violates WCAG 2.1 1.4.4.
+
+Acceptable inside a Tauri iOS app bundle, where the viewport is a sealed app surface and the user isn't expecting browser gestures. **Not** acceptable on a public web preview URL. If you ship the same `index.html` to both targets, Option D leaks a bad mobile-web experience.
+
+## Tauri-Specific Note
+
+The Tauri iOS template's default `index.html` viewport meta does **not** set `maximum-scale`. If your existing desktop `index.html` already uses `user-scalable=no`, you are implicitly on Option D for the app build -- which is fine -- but you're also shipping that same policy to any web preview of the same frontend.
+
+Two ways to handle this cleanly:
+
+- Serve a different `index.html` (or a different viewport meta) for the web build, with pinch-zoom enabled
+- Drop `user-scalable=no` entirely and rely on Option A (per-input font sizing) for the auto-zoom problem in both the app and the web
+
+## Testing
+
+- **iOS Simulator** reproduces the auto-zoom. This is the lowest-friction way to verify a fix from a Mac.
+- **Safari on macOS** does **not** reproduce it. The 16px rule is iOS-only.
+- **Chrome DevTools "iPhone" device emulation** does **not** reproduce it either. It's a real WebKit-on-iOS behavior, not a viewport-size behavior.
+
+Lowest-overhead manual check: open the page on an actual iPhone in Safari, tap the input, see whether the viewport zooms. If it zooms and stays zoomed after blur, the fix isn't in place yet.
+
+## Related Pages
+
+- [WKWebView Gotchas on iOS](./wkwebview-gotchas.mdx) for the related input-focus scroll jump issue, which has the same surface area but a different cause
+- [Display Scale System](../recipes/display-scale-system.mdx) for the global scale approach referenced in Option B

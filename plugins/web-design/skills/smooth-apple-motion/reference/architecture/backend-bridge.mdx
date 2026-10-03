@@ -1,0 +1,230 @@
+---
+title: Backend Bridge / Adapter Pattern
+description: A swappable backend abstraction layer enabling three development modes with a single frontend codebase
+sidebar_position: 5
+---
+
+# Backend Bridge / Adapter Pattern
+
+The backend bridge is an abstraction layer that decouples the frontend from a specific communication mechanism. By swapping adapters, the same React frontend can run against Tauri IPC (production), an in-memory mock (development/testing), or an HTTP REST API (hybrid development).
+
+## Why an Abstraction Layer?
+
+Tauri apps typically call `invoke()` directly from components. This works, but creates tight coupling:
+
+- **Cannot test without Tauri** -- Unit tests and Storybook stories cannot call `invoke()` because there is no Rust backend running
+- **Cannot develop frontend-only** -- Changing a React component requires starting the full Rust build pipeline
+- **Cannot use alternative transports** -- No way to debug the frontend against a running backend over HTTP
+
+The backend bridge solves all three problems by defining a single `BackendAPI` interface that adapters implement.
+
+## The BackendAPI Interface
+
+The interface defines every operation the frontend needs, organized by domain:
+
+```ts
+export interface BackendAPI {
+  messages: {
+    list: () => Promise<MessageMeta[]>;
+    read: (filename: string) => Promise<string | null>;
+    write: (filename: string, content: string) => Promise<boolean>;
+    create: (name: string, content: string) => Promise<string>;
+    onChanged: (callback: (filename?: string) => void) => () => void;
+    // ...
+  };
+  pins: {
+    list: (pinIndex: number) => Promise<PinEntry[]>;
+    read: (pinIndex: number, entryPath: string) => Promise<string | null>;
+    // ...
+  };
+  terminal: {
+    spawn: (cwd?: string) => Promise<string>;
+    write: (id: string, data: string) => Promise<void>;
+    onData: (callback: (id: string, data: string) => void) => () => void;
+    // ...
+  };
+  draft: { /* ... */ };
+  drafts: { /* ... */ };
+  settings: {
+    get: () => Promise<AppSettings | null>;
+    save: (settings: AppSettings) => Promise<boolean>;
+  };
+  // ...more domains
+}
+```
+
+Every method returns a `Promise` (commands) or returns a cleanup function (event listeners). This uniform contract makes adapters interchangeable.
+
+## Initialization and Access
+
+The bridge uses a simple singleton pattern:
+
+```ts
+let backend: BackendAPI | null = null;
+
+export function initBackend(adapter: BackendAPI): void {
+  backend = adapter;
+}
+
+export function getBackend(): BackendAPI {
+  if (!backend) {
+    throw new Error("Backend not initialized. Call initBackend() first.");
+  }
+  return backend;
+}
+```
+
+The app's entry point calls `initBackend()` once with the appropriate adapter. All components call `getBackend()` to access the API.
+
+## The Three Adapters
+
+### TauriAdapter -- Native IPC
+
+Used in production (`pnpm tauri:dev`). Maps every `BackendAPI` method to a Tauri `invoke()` call:
+
+```ts
+export function createTauriAdapter(): BackendAPI {
+  return {
+    messages: {
+      list: () => invoke<MessageMeta[]>("messages_list", { includeBody: false }),
+      read: (filename) => invoke<string | null>("messages_read", { filename }),
+      write: (filename, content) =>
+        invoke<boolean>("messages_write", { filename, content }),
+      onChanged: (callback) =>
+        syncListen<{ filename?: string }>("messages:changed", (payload) => {
+          callback(payload.filename);
+        }),
+      // ...
+    },
+    // ...
+  };
+}
+```
+
+Event listeners use a `syncListen` helper that wraps Tauri's async `listen()` to return a synchronous cleanup function, matching the `BackendAPI` contract:
+
+```ts
+function syncListen<T>(
+  event: string,
+  handler: (payload: T) => void,
+): () => void {
+  let unlistenFn: (() => void) | null = null;
+  let cancelled = false;
+
+  listen<T>(event, (e) => handler(e.payload))
+    .then((fn) => {
+      if (cancelled) fn();
+      else unlistenFn = fn;
+    });
+
+  return () => {
+    cancelled = true;
+    unlistenFn?.();
+  };
+}
+```
+
+### MockAdapter -- In-Memory
+
+Used for frontend-only development (`pnpm dev:mock`) and Storybook/testing. Implements the full API using in-memory `Map` objects:
+
+```ts
+export function createMockAdapter(options?: MockAdapterOptions): {
+  api: BackendAPI;
+  controls: MockControls;
+} {
+  const files = new Map<string, string>();
+  const pinFiles = new Map<string, string>();
+  // ...seed data...
+
+  const api: BackendAPI = {
+    messages: {
+      list: async () => { /* sort and return from files Map */ },
+      read: async (filename) => files.get(filename) ?? null,
+      write: async (filename, content) => { files.set(filename, content); return true; },
+      // ...
+    },
+    // ...
+  };
+
+  const controls: MockControls = {
+    triggerMessagesChanged: (...args) => messagesChanged.emit(...args),
+    files,
+    // ...
+  };
+
+  return { api, controls };
+}
+```
+
+<Tip>
+
+The mock adapter returns a `controls` object alongside the API. Tests use `controls` to trigger events (e.g., `controls.triggerMessagesChanged()`) and inspect internal state (e.g., `controls.files`). This makes it easy to simulate backend-initiated changes like file watcher notifications.
+
+</Tip>
+
+The mock adapter seeds realistic data (sample messages, a pin tree, font list) so the UI looks populated during development.
+
+### RestAdapter -- HTTP/SSE
+
+Used for hybrid development (`pnpm dev:rest`). Maps commands to HTTP requests and events to Server-Sent Events:
+
+```ts
+export function createRestAdapter(baseUrl = "http://localhost:3001"): BackendAPI {
+  async function getJson<T>(path: string): Promise<T> {
+    const res = await fetch(`${baseUrl}${path}`);
+    if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
+    return res.json();
+  }
+
+  function sseListener(eventType: string, callback: (data: unknown) => void): () => void {
+    const es = getSharedEventSource();
+    const handler = (e: MessageEvent) => callback(JSON.parse(e.data));
+    es.addEventListener(eventType, handler);
+    return () => {
+      es.removeEventListener(eventType, handler);
+      releaseSharedEventSource();
+    };
+  }
+
+  return {
+    messages: {
+      list: () => getJson<MessageMeta[]>("/api/messages"),
+      read: (filename) => getText(`/api/messages/${encodeURIComponent(filename)}`),
+      onChanged: (callback) =>
+        sseListener("messages:changed", (data) =>
+          callback((data as { filename?: string }).filename)
+        ),
+      // ...
+    },
+    // ...
+  };
+}
+```
+
+The REST adapter uses a shared `EventSource` with reference counting -- multiple listeners share one SSE connection, and it closes when the last listener unsubscribes.
+
+<Note>
+
+Some features are inherently native and cannot work over HTTP. The REST adapter stubs these with warnings:
+
+- `terminal.*` -- PTY sessions cannot be forwarded over HTTP
+- `dialog.openDirectory` / `dialog.openFile` -- Native OS dialogs require Tauri
+- `workspace.setDir` -- Requires native directory picker
+
+</Note>
+
+## Development Modes Enabled
+
+| Mode | Command | Adapter | Backend | Use Case |
+|------|---------|---------|---------|----------|
+| Full Tauri | `pnpm tauri:dev` | TauriAdapter | Rust (IPC) | Production parity |
+| Mock | `pnpm dev:mock` | MockAdapter | None | Frontend-only, Storybook, tests |
+| REST | `pnpm dev:rest` | RestAdapter | Rust (HTTP) | Debug with real data, no recompile for frontend changes |
+
+## Key Design Decisions
+
+1. **Promise-based commands, callback-based events** -- Commands are one-shot request/response pairs. Events are long-lived subscriptions. The interface reflects this difference.
+2. **Event listeners return cleanup functions** -- Following React's `useEffect` cleanup pattern, every `on*` method returns an unsubscribe function. This prevents memory leaks when components unmount.
+3. **Adapter is set once at startup** -- No runtime switching. The Vite config determines which adapter the build uses, keeping the runtime code simple.
+4. **Mock adapter has full fidelity** -- It implements collision handling, frontmatter parsing, and sort ordering to match the real backend. This catches integration bugs early.

@@ -1,0 +1,84 @@
+---
+title: Asset Protocol and CSP Scope
+description: The WebView config behind convertFileSrc -- the csp null shortcut, the assetProtocol scope allowlist, and why images go blank in a hardened build.
+sidebar_position: 10
+---
+
+## What this page covers
+
+`convertFileSrc` turns a local file path into an `asset://` URL the WebView can load directly (used for thumbnails, image previews, anything you don't want to round-trip through IPC as base64).
+
+Whether that URL actually loads is decided entirely by **WebView config** -- specifically the Content Security Policy and the asset protocol scope in `tauri.conf.json`. This page is about that config layer. (The Rust-side `convertFileSrc` usage and the path/base64 decision live on a separate page.)
+
+## The `csp: null` shortcut
+
+Many small/internal apps take the shortcut of disabling CSP entirely. With no CSP, `asset://` URLs load with **no allowlist** -- you don't need an `assetProtocol` block at all:
+
+```json
+{
+  "app": {
+    "security": {
+      "csp": null
+    }
+  }
+}
+```
+
+That is the entire security block in a real image-viewer app: `csp: null`, no `assetProtocol` scope. `convertFileSrc` returns a URL and the WebView loads it from anywhere on disk.
+
+<Warning>
+
+`"csp": null` disables Content Security Policy completely. The WebView can load scripts, styles, and files from any origin and any path on disk. Fine for a local dev tool you control; not acceptable for a hardened, distributable app.
+
+</Warning>
+
+## The hardened build: scope + tightened CSP
+
+For a distributable build you turn CSP back on. The moment you do, the asset protocol stops being implicitly open -- you must **enable it and declare a scope**, and you must **allowlist `asset:` in the CSP**.
+
+Enable the protocol and scope which paths it may serve:
+
+```json
+{
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost blob: data:",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/images/**", "$HOME/Pictures/**"]
+      }
+    }
+  }
+}
+```
+
+Two things are doing the work here:
+
+- **`assetProtocol.scope`** is an array of glob patterns (it uses `FsScope`, the same path-glob mechanism as the fs plugin). Only files matching a pattern can be served. Tauri path variables like `$APPDATA`, `$HOME`, `$RESOURCE` are expanded.
+- **`img-src ... asset: http://asset.localhost`** is the CSP token that lets the WebView render the URL. `asset:` covers macOS/Linux; `http://asset.localhost` is the Windows form of the same protocol. Omit either and the image is blocked by CSP even when the scope allows the file.
+
+## The trap: works in dev, blank in a locked-down build
+
+This is the classic failure mode. During development you ran with `csp: null`, so `convertFileSrc` images loaded fine. You then ship a hardened config with a real CSP -- and every asset image renders blank, with **no error dialog and no thrown exception**. The only signal is a CSP violation in the WebView devtools console.
+
+The cause is one of two missing pieces:
+
+1. **No `asset:` / `http://asset.localhost` in `img-src`** -- the CSP blocks the URL before the file is ever read.
+2. **The file isn't inside `assetProtocol.scope`** -- the protocol refuses to serve it.
+
+<Note>
+
+The failure is silent because a blocked `<img>` does not throw; the element just shows nothing. If asset images "disappeared" the moment you tightened CSP, check the devtools console for a CSP `img-src` violation first, then verify the file path matches a `scope` glob.
+
+</Note>
+
+## Key takeaways
+
+1. **`csp: null` opens the asset protocol with no allowlist** -- the real-world shortcut, fine only for local tools.
+2. **A real CSP requires `assetProtocol.enable: true` plus a `scope`** -- the protocol is off by default once CSP is active.
+3. **`img-src` must list `asset:` and `http://asset.localhost`** -- the cross-platform tokens that let the WebView render the URL.
+4. **The dev-to-prod trap is silent** -- images that worked under `csp: null` go blank under a strict CSP with no error; check the devtools console.
+
+## See also
+
+The [Image Viewer App recipe](../recipes/image-viewer-app.mdx) shows how `convertFileSrc` and the asset protocol are used end-to-end in a real app with HEIC decoding and a two-tier thumbnail cache.

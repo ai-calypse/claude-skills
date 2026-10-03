@@ -1,0 +1,304 @@
+---
+title: Project Setup
+description: Complete guide to Cargo.toml, tauri.conf.json, capabilities, and directory structure for Tauri v2 apps
+sidebar_position: 2
+---
+
+# Project Setup
+
+This page covers the essential configuration files for a Tauri v2 project. Every example is derived from real working applications.
+
+## Directory Structure
+
+A typical Tauri v2 project follows this layout:
+
+```
+my-app/
+  Cargo.toml          # Rust dependencies and package config
+  build.rs            # Tauri build script (required)
+  tauri.conf.json     # Tauri-specific configuration
+  capabilities/
+    default.json      # Permissions and security capabilities
+  src/
+    main.rs           # Application entry point
+    lib.rs            # Optional library module
+  frontend/           # Static loading page (frontendDist target)
+    index.html
+  binaries/           # Sidecar binaries (if using externalBin)
+    node-aarch64-apple-darwin
+  .gitignore
+```
+
+## Cargo.toml
+
+### Minimal Setup
+
+For a lightweight wrapper app, the dependencies are minimal:
+
+```toml
+[package]
+name = "my-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+libc = "0.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+```
+
+The `devtools` feature enables the WebView developer tools toggle. The `libc` crate is needed for process signal handling (`SIGTERM`, `SIGKILL`) on Unix systems.
+
+### Full-Featured Setup
+
+For an app with more capabilities (dialogs, shell access, private APIs, PTY support):
+
+```toml
+[package]
+name = "zudotext"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "zudotext_lib"
+path = "src/lib.rs"
+
+[dependencies]
+tauri = { version = "2", features = ["devtools", "macos-private-api", "webview-data-url"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+tokio = { version = "1", features = ["sync", "net"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", features = ["NSWindow"] }
+objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+```
+
+<Note>
+
+The `macos-private-api` feature enables access to macOS-specific APIs like transparent titlebars. You also need to set `"macOSPrivateApi": true` in `tauri.conf.json` to use it.
+
+</Note>
+
+### Common Tauri Features
+
+| Feature | Purpose |
+|---------|---------|
+| `devtools` | Enables WebView developer tools |
+| `macos-private-api` | Access to macOS-private APIs (titlebar, etc.) |
+| `webview-data-url` | Load content from data URLs |
+
+## build.rs
+
+Every Tauri project requires a `build.rs` file. It is always the same:
+
+```rust
+fn main() {
+    tauri_build::build()
+}
+```
+
+This is non-negotiable. Without it, `tauri::generate_context!()` in your main.rs will fail to compile.
+
+## tauri.conf.json
+
+This is the central configuration file for your Tauri app. The structure varies based on your app's needs.
+
+### Lightweight Wrapper (Dev Server)
+
+This pattern wraps an external dev server. The app shows a loading page from `frontendDist` while the server starts, then navigates to the dev server URL.
+
+```json
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "zmod doc",
+  "version": "0.1.0",
+  "identifier": "com.takazudo.zmod-doc",
+  "build": {
+    "frontendDist": "./frontend",
+    "beforeDevCommand": "cd ../../doc && pnpm dev",
+    "devUrl": "http://localhost:32342/"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [],
+    "category": "DeveloperTool",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}
+```
+
+### Full-Featured App
+
+An app with its own Vite-built frontend:
+
+```json
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "zudotext",
+  "version": "0.1.0",
+  "identifier": "com.takazudo.zudotext",
+  "build": {
+    "beforeDevCommand": "pnpm exec vite --config vite.config.ts",
+    "beforeBuildCommand": "pnpm exec vite build --config vite.config.ts",
+    "devUrl": "http://localhost:37461",
+    "frontendDist": "./dist-renderer"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}
+```
+
+### Bundled Sidecar App
+
+An app that bundles a Node.js binary as an external sidecar:
+
+```json
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Claude Resources",
+  "version": "0.1.0",
+  "identifier": "com.takazudo.claude-resources",
+  "build": {
+    "frontendDist": "./frontend"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [],
+    "category": "DeveloperTool",
+    "externalBin": ["binaries/node"],
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}
+```
+
+### Key Fields Explained
+
+#### build
+
+| Field | Purpose |
+|-------|---------|
+| `frontendDist` | Path to static frontend assets. Used for loading page and/or production build output. |
+| `beforeDevCommand` | Shell command Tauri runs before `cargo tauri dev`. Typically starts a dev server. |
+| `beforeBuildCommand` | Shell command Tauri runs before `cargo tauri build`. Typically builds the frontend. |
+| `devUrl` | URL to load in the WebView during development. |
+
+<Warning>
+
+`beforeDevCommand` runs **only** during `cargo tauri dev`. It does not run when you launch the production `.app` bundle. Your Rust code must handle starting any servers needed in production.
+
+</Warning>
+
+#### app
+
+| Field | Purpose |
+|-------|---------|
+| `windows` | Window definitions. Set to `[]` when creating windows from Rust code. |
+| `macOSPrivateApi` | Enable macOS-private APIs. Requires `macos-private-api` in Cargo.toml features. |
+| `security.csp` | Content Security Policy. Set to `null` to disable for dev tool apps. |
+
+#### bundle
+
+| Field | Purpose |
+|-------|---------|
+| `targets` | Build targets. `"all"` builds all platform targets. |
+| `externalBin` | Paths to binaries to bundle inside the app. Tauri appends the target triple during build. |
+| `category` | macOS app category. |
+| `macOS.minimumSystemVersion` | Minimum macOS version. `"10.15"` (Catalina) is a sensible default. |
+
+<Note>
+
+When `"windows": []` is set, no windows are created automatically by Tauri. You must create them yourself in the `setup()` closure using `WebviewWindowBuilder`. This gives you full control over when and how windows appear.
+
+</Note>
+
+## Capabilities (capabilities/default.json)
+
+Capabilities define what your app is allowed to do. Create `capabilities/default.json`:
+
+```json
+{
+  "identifier": "default",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://localhost:*/**"]
+  },
+  "permissions": ["core:default", "dialog:default", "shell:default"]
+}
+```
+
+### Fields
+
+| Field | Purpose |
+|-------|---------|
+| `identifier` | Unique name for this capability set. |
+| `windows` | Which windows this capability applies to. |
+| `remote.urls` | URLs allowed to access Tauri commands. Use `localhost:*` for dev server apps. |
+| `permissions` | List of permission grants. `core:default` is always needed. |
+
+<Warning>
+
+The `remote.urls` field is critical for apps that navigate to localhost servers. Without it, your WebView content loaded from a localhost URL will not be able to call any Tauri commands via `invoke()`.
+
+</Warning>
+
+## .gitignore
+
+For Tauri projects, add these entries:
+
+```
+/target/
+/gen/
+/binaries/
+```
+
+| Path | Why |
+|------|-----|
+| `/target/` | Rust build output. Large, reproducible. |
+| `/gen/` | Tauri-generated files (icons, Info.plist). Regenerated by the build. |
+| `/binaries/` | Downloaded sidecar binaries (e.g., Node.js). Typically 80-100 MB. Should be downloaded via script, not committed. |
+
+<Tip>
+
+Always provide a download script (like `scripts/download-node.sh`) instead of committing large binaries to the repository. This keeps the repo small and makes platform-specific binaries easy to manage.
+
+</Tip>

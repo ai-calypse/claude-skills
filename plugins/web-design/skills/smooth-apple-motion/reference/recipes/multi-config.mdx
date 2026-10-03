@@ -1,0 +1,378 @@
+---
+title: Multi-Config App Variants
+description: Building multiple Tauri app variants from shared code using overlaid config files
+sidebar_position: 4
+---
+
+# Multi-Config App Variants
+
+A single Tauri codebase can produce multiple app variants -- different names, identifiers, and icons -- by using overlaid configuration files. The base `tauri.conf.json` contains the full configuration, and variant configs override only the fields that differ.
+
+## The Problem
+
+You have a text editor app called "zudotext". Now you want to create a second app called "ztoffice" with:
+
+- A different name and icon
+- A different macOS bundle identifier
+- The same Rust code and frontend
+
+You could copy the entire project, but that means maintaining two copies of everything. Instead, use config overlays.
+
+## How Config Overlay Works
+
+Tauri's `--config` flag accepts an additional JSON file that is **merged on top of** the base `tauri.conf.json`. The overlay only needs to contain the fields you want to override.
+
+```bash
+# Build the base app
+cargo tauri build
+
+# Build the variant app
+cargo tauri build --config tauri.conf.ztoffice.json
+```
+
+## Real Example
+
+### Base Config: tauri.conf.json
+
+The full configuration with all fields:
+
+```json
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "zudotext",
+  "version": "0.1.0",
+  "identifier": "com.takazudo.zudotext",
+  "build": {
+    "beforeDevCommand": "pnpm exec vite --config vite.config.ts",
+    "beforeBuildCommand": "pnpm exec vite build --config vite.config.ts",
+    "devUrl": "http://localhost:37461",
+    "frontendDist": "./dist-renderer"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}
+```
+
+### Variant Config: tauri.conf.ztoffice.json
+
+Only the fields that differ:
+
+```json
+{
+  "productName": "ztoffice",
+  "identifier": "com.takazudo.ztoffice"
+}
+```
+
+That is the entire file -- just two fields. When you run `cargo tauri build --config tauri.conf.ztoffice.json`, Tauri:
+
+1. Reads the base `tauri.conf.json`
+2. Deep-merges `tauri.conf.ztoffice.json` on top
+3. Builds with `productName: "ztoffice"` and `identifier: "com.takazudo.ztoffice"`
+4. Everything else (build commands, bundle config, etc.) comes from the base
+
+The output is:
+
+```
+target/release/bundle/macos/ztoffice.app
+```
+
+## What You Can Override
+
+Any field in `tauri.conf.json` can be overridden in the variant config. Common overrides:
+
+| Field | Purpose |
+|-------|---------|
+| `productName` | The app name (displayed in title bar, dock) |
+| `identifier` | macOS bundle identifier (must be unique per app) |
+| `bundle.icon` | App icon |
+| `build.beforeDevCommand` | Different dev command for the variant |
+| `build.frontendDist` | Different frontend assets |
+
+## Per-Variant Workspace Resolution
+
+The multi-config pattern becomes particularly powerful when your Rust code adapts behavior based on the app name. Consider the project root resolution from the [Text Editor App](./text-editor-app):
+
+```rust
+// In production, derive app name from the .app bundle path
+// /Applications/ztoffice.app/Contents/MacOS/zudotext
+//              ^^^^^^^^^^ this is the app_name
+let app_name = std::env::current_exe()
+    .ok()
+    .and_then(|exe| {
+        exe.ancestors()
+            .find(|p| p.extension().map(|ext| ext == "app").unwrap_or(false))
+            .and_then(|app_dir| {
+                app_dir.file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+            })
+    })
+    .unwrap_or_else(|| "default".to_string());
+```
+
+This means:
+
+- `zudotext.app` gets workspace at `~/Documents/zudo-text/zudotext/`
+- `ztoffice.app` gets workspace at `~/Documents/zudo-text/ztoffice/`
+
+Each variant has its own isolated workspace, configured via:
+
+```
+~/.config/zudotext/
+  zudotext/
+    config.json    # workspace for the base app
+  ztoffice/
+    config.json    # workspace for the variant
+```
+
+<Tip>
+
+Notice that the config directory uses the binary name (`zudotext`), while the subdirectory uses the app bundle name. This means all variants of the same binary share a config namespace, which is intentional -- they are variants of the same app.
+
+</Tip>
+
+## Build Scripts
+
+For convenience, create build scripts for each variant:
+
+```bash
+#!/bin/bash
+# scripts/build-zudotext.sh
+set -e
+cargo clean -p zudotext
+cargo tauri build
+killall zudotext 2>/dev/null || true
+sleep 1
+rm -rf /Applications/zudotext.app
+cp -r target/release/bundle/macos/zudotext.app /Applications/
+xattr -cr /Applications/zudotext.app
+echo "Installed zudotext.app"
+```
+
+```bash
+#!/bin/bash
+# scripts/build-ztoffice.sh
+set -e
+cargo clean -p zudotext
+cargo tauri build --config tauri.conf.ztoffice.json
+killall ztoffice 2>/dev/null || true
+sleep 1
+rm -rf /Applications/ztoffice.app
+cp -r target/release/bundle/macos/ztoffice.app /Applications/
+xattr -cr /Applications/ztoffice.app
+echo "Installed ztoffice.app"
+```
+
+<Note>
+
+Both scripts use `cargo clean -p zudotext` (the crate name, not the product name). The crate name does not change between variants -- only the product name does.
+
+</Note>
+
+## Dev Mode with Variants
+
+For development, you can also use `--config`:
+
+```bash
+cargo tauri dev --config tauri.conf.ztoffice.json
+```
+
+This runs the variant in dev mode with the overridden product name and identifier.
+
+## Variant-Specific Frontend Config
+
+If your variants need different frontend behavior, you can pass information from the config through to the frontend. One approach is to use Vite environment variables:
+
+```bash
+# In tauri.conf.ztoffice.json
+{
+  "productName": "ztoffice",
+  "identifier": "com.takazudo.ztoffice",
+  "build": {
+    "beforeBuildCommand": "VITE_APP_VARIANT=ztoffice pnpm exec vite build --config vite.config.ts"
+  }
+}
+```
+
+Then in your frontend:
+
+```typescript
+const appVariant = import.meta.env.VITE_APP_VARIANT || 'zudotext';
+```
+
+Alternatively, your Rust code can expose the app name via an IPC command, which the frontend queries at startup.
+
+## Limitations
+
+- **Same Rust binary** -- all variants compile to the same Rust binary. You cannot have variant-specific Rust code through config alone (use feature flags for that)
+- **Same bundle resources** -- unless you override `bundle.icon` or `frontendDist`, all variants share the same resources
+- **Same Cargo.toml** -- the crate name in `Cargo.toml` does not change, only the Tauri product name
+
+## Runtime Gotchas
+
+The `current_exe()` app-name derivation shown above works cleanly for installed `.app` bundles, but two runtime situations break it. Both must be handled explicitly or a variant will silently corrupt another variant's state.
+
+### Dev-Mode Pitfall: No `.app` Ancestor
+
+Dev builds run from `target/debug/`, not from a `.app` bundle. The `current_exe()` path has **no `.app` ancestor**, so the derivation finds nothing and falls through to its fallback. If that fallback happens to resolve to an installed app's name, dev runs will read and write the **installed app's** workspace registry -- a development session quietly mutating production state.
+
+The fix is to short-circuit on `cfg!(debug_assertions)` and hard-code `"default"` rather than relying on the derivation's fallback:
+
+```rust
+pub fn resolve_app_config_dir() -> std::path::PathBuf {
+    let home = dirs::home_dir().expect("could not determine home directory");
+    let app_name = if cfg!(debug_assertions) {
+        // Dev mode: do not reuse the binary's .app ancestor because there
+        // often isn't one (dev builds run from target/debug/). Anchor the
+        // registry under "default/" so dev work does not touch any
+        // installed app's registry.
+        "default".to_string()
+    } else {
+        resolve_app_name()
+    };
+    let dir = home.join(".config/zudotext").join(&app_name);
+    std::fs::create_dir_all(&dir).ok();
+    dir
+}
+```
+
+<Warning>
+
+Without the `cfg!(debug_assertions)` branch, the only thing standing between a dev session and an installed app's registry is whatever the fallback resolves to. Anchoring dev under `"default/"` makes the isolation explicit instead of accidental.
+
+</Warning>
+
+### Manager-Mode Gating
+
+When the same binary also ships as a **manager** (a launcher app that lists and opens the per-app variants), the manager build runs the same startup code as a regular variant -- but it has no workspace of its own. If it runs the full startup sequence, it will write to the `default` workspace registry, spin up file watchers, and bind the REST adapter on port 3001 just by booting. Worse, the port bind **races a parallel dev session** that also wants port 3001.
+
+Detect manager mode from the baked-in `productName` (surfaced at runtime as `package_info().name`), then skip the writing-app side effects:
+
+```rust
+pub const MANAGER_PRODUCT_NAME: &str = "zudotext";
+
+pub fn is_manager_mode<R: tauri::Runtime, M: Manager<R>>(handle: &M) -> bool {
+    handle.package_info().name == MANAGER_PRODUCT_NAME
+}
+```
+
+```rust
+let manager_mode = app_mode::is_manager_mode(app.handle());
+
+// Workspace-registry write — skipped in manager mode so the manager
+// does not clobber the default text-app workspace.
+if !manager_mode {
+    register_workspace(&app_config_dir);
+}
+
+// REST adapter (axum on port 3001) — dev only, and never in the
+// manager, where binding 3001 would race a real text-app dev session.
+if cfg!(debug_assertions) && !manager_mode {
+    tauri::async_runtime::spawn(async move {
+        http_server::start(http_state, http_handle, 3001).await;
+    });
+}
+
+// File watchers — the manager has no workspace to watch.
+if !manager_mode {
+    commands::watchers::start_messages_watcher(&state_arc, app.handle());
+}
+```
+
+The constant is hard-coded rather than read from a feature flag so the check cannot be flipped at runtime: the base `tauri.conf.json` builds the manager (`productName: "zudotext"`), while every per-variant `--config` override changes `productName` to something else, so anything not equal to the constant is treated as a writing app.
+
+## Two Tauri Crates from One Frontend
+
+The `--config` overlay covers variants that differ only in surface metadata -- name, icon, identifier. But some apps ship two **fundamentally different launch modes** from one frontend, and an overlay cannot express that. In that case the right structure is two crate directories, not one crate with overlays.
+
+The motivating case is an app that ships both an **offline reader** (bundles a pre-built site, no dev server) and a **configurable dev wrapper** (loads a live dev server through a local loading page). These are not two skins of the same runtime -- their `frontendDist` and dev-server behavior differ at the core.
+
+### Crate 1: `src-tauri` -- Offline Reader
+
+Bundles the pre-built `dist/` into a self-contained app. No bundle output beyond the binary, no live frontend.
+
+```json
+{
+  "productName": "ZudoDoc",
+  "version": "0.1.0",
+  "identifier": "com.zudolab.zudo-doc",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all",
+    "icon": [],
+    "category": "DeveloperTool",
+    "macOS": { "minimumSystemVersion": "10.15" }
+  }
+}
+```
+
+The reader points `frontendDist` at `../dist` (the already-built site) and sets `bundle.active: false` -- it is a runtime wrapper around static assets, not a distributable installer.
+
+### Crate 2: `src-tauri-dev` -- Configurable Dev Wrapper
+
+A shippable app whose frontend is a local loading page that boots a dev server. It runs `pnpm dev` from the parent directory and exposes the global Tauri API to its loading page.
+
+```json
+{
+  "productName": "zudo-doc dev",
+  "version": "0.1.0",
+  "identifier": "com.takazudo.zudo-doc-dev",
+  "build": {
+    "frontendDist": "./frontend",
+    "beforeDevCommand": "cd .. && pnpm dev",
+    "devUrl": "http://localhost:4321/"
+  },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": true,
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png"],
+    "category": "DeveloperTool",
+    "macOS": { "minimumSystemVersion": "10.15" }
+  }
+}
+```
+
+The differences from the reader are structural, not cosmetic:
+
+| Field | Reader (`src-tauri`) | Dev wrapper (`src-tauri-dev`) |
+|-------|----------------------|-------------------------------|
+| `frontendDist` | `../dist` (pre-built site) | `./frontend` (local loading page) |
+| `beforeDevCommand` | none | `cd .. && pnpm dev` |
+| `bundle.active` | `false` | `true` |
+| `bundle.icon` | `[]` | `["icons/icon.png"]` |
+| `withGlobalTauri` | unset | `true` |
+
+### When a Second Crate Beats an Overlay
+
+Reach for a second crate dir -- not a `--config` overlay -- when the **`frontendDist` or dev-server behavior itself differs**, not just the name, icon, or identifier.
+
+<Tip>
+
+The test is simple: if a variant differs only in `productName`, `identifier`, and `bundle.icon`, use a `--config` overlay -- it stays DRY and shares one crate. If the variant changes how the frontend is loaded (static bundle vs live dev server) or whether a dev command runs at all, fork into a second crate directory. Trying to express a different launch mode through overlays leaves you toggling `frontendDist` and `beforeDevCommand` across configs, which is harder to reason about than two explicit crate dirs.
+
+</Tip>
