@@ -64,7 +64,7 @@ background/rationale/prose that doesn't steer future work.
 If nothing drifted: **"The rules file is still accurate for these changes — no edits needed."**
 
 ## Rules
-- **Advisory.** Report the drift; only apply/piv-commit edits if the caller explicitly asks.
+- **Advisory.** Report the drift; only apply or commit edits if the caller explicitly asks.
 - **Rules file only** (`CLAUDE.md` / `AGENTS.md`). Not README, not docs.
 - **Lean by default.** When in doubt, suggest nothing.
-- **Run it before every merge** (or as part of `/piv-review-changes`) so your rules never drift behind the code.
+- **Run it before every merge** (or as part of `/review`) so your rules never drift behind the code.

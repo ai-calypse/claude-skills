@@ -84,7 +84,7 @@ context** — that's what lets a loop pick it up later without re-reading the wh
 ## Output
 
 A ticket breakdown in your tracker (or `docs/tickets/<epic-slug>.md`). Each ticket then enters its own PIV loop —
-straight to `/piv-plan-implementation` if it's well-scoped (it primes what it needs), or `/prime-codebase` first if it needs more
+straight to `/plan-eng-review` if it is well-scoped, or explore the codebase first if it needs more
 codebase orientation. **Priming is optional**; the per-ticket context above is what makes that possible.
 
 ## Notes
