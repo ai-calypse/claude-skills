@@ -7,7 +7,7 @@
     {
       "name": "ai-dev",
       "source": "./plugins/ai-dev",
-      "description": "ai-dev skills (4)"
+      "description": "ai-dev skills (3)"
     },
     {
       "name": "blog-seo",
@@ -27,7 +27,7 @@
     {
       "name": "core",
       "source": "./plugins/core",
-      "description": "core skills (1)"
+      "description": "core skills (2)"
     },
     {
       "name": "flutter",
