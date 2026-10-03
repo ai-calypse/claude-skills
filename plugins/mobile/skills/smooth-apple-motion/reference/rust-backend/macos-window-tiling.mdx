@@ -1,0 +1,115 @@
+---
+title: macOS Window Tiling Shortcuts
+description: "Fix macOS system window tiling shortcuts (Tile Left/Right/Top/Bottom Half) that don't work in Tauri apps due to a muda menu library bug."
+sidebar_position: 9
+---
+
+## The problem
+
+macOS system window tiling shortcuts do not work in Tauri apps. These shortcuts -- configured in System Preferences > Keyboard > Shortcuts > Windows (e.g., Tile Left Half, Tile Right Half) -- work fine in Electron apps (Obsidian, Discord, Slack) and native macOS apps, but Tauri apps silently ignore them.
+
+On macOS 15+ (Sequoia), the built-in tiling shortcuts are `Fn+Control+Arrow`. Custom shortcuts configured in System Preferences use different key combos (e.g., `⌃⌘J`, `⌃⌘;`).
+
+<Note>
+
+BetterTouchTool window resizing works with Tauri apps because it uses Accessibility APIs, which is a completely different mechanism from the system tiling shortcuts. The system tiling feature requires a registered **Window menu** at the AppKit level.
+
+</Note>
+
+## Root cause
+
+macOS injects tiling menu items into whichever `NSMenu` is registered as the "Windows menu" via `[NSApp setWindowsMenu:]`. If no menu is registered, the system has nowhere to inject tiling items, so the shortcuts do nothing.
+
+Two things were wrong:
+
+1. **muda bug (v0.17.1)**: The `set_as_windows_menu_for_nsapp()` method passed an internal template `NSMenu` to `[NSApp setWindowsMenu:]` instead of the actual displayed `NSMenu`. Even if you called it, it registered the wrong menu. This was fixed in [muda v0.17.2](https://github.com/tauri-apps/muda/pull/335).
+2. **Missing call**: The app code never called `set_as_windows_menu_for_nsapp()` on the Window submenu, so macOS never knew which menu was the Window menu.
+
+### Why Electron works
+
+Electron explicitly calls `[NSApp setWindowsMenu:submenu]` when a menu has `role == "window"`, passing the actual displayed `NSMenu`. This is why tiling "just works" in Electron apps.
+
+## The fix
+
+Two steps are required:
+
+### Step 1: Update muda to v0.17.2+
+
+```bash
+cargo update -p muda
+```
+
+Verify the version in `Cargo.lock`:
+
+```
+[[package]]
+name = "muda"
+version = "0.17.2"
+```
+
+### Step 2: Register the Window menu
+
+Return the Window submenu from your `create_menu` function and call `set_as_windows_menu_for_nsapp()` after setting the menu:
+
+```rust
+// menu.rs
+pub fn create_menu(
+    app: &tauri::App,
+) -> tauri::Result<(Menu<tauri::Wry>, Submenu<tauri::Wry>)> {
+    let handle = app.handle();
+    let menu = Menu::new(handle)?;
+
+    // ... build App, File, Edit, View menus ...
+
+    // Window menu
+    let window_menu = Submenu::new(handle, "Window", true)?;
+    window_menu.append(&PredefinedMenuItem::minimize(handle, None)?)?;
+    window_menu.append(&PredefinedMenuItem::maximize(handle, None)?)?;
+    window_menu.append(&PredefinedMenuItem::separator(handle)?)?;
+    #[cfg(target_os = "macos")]
+    {
+        window_menu.append(
+            &PredefinedMenuItem::show_all(handle, None)?,
+        )?;
+    }
+    menu.append(&window_menu)?;
+
+    // Return both the full menu and the Window submenu
+    Ok((menu, window_menu))
+}
+```
+
+```rust
+// main.rs — inside setup()
+let (menu, window_menu) = native::menu::create_menu(app)?;
+app.set_menu(menu)?;
+
+#[cfg(target_os = "macos")]
+window_menu.set_as_windows_menu_for_nsapp()?;
+
+native::menu::register_menu_handler(app);
+```
+
+<Warning>
+
+The `set_as_windows_menu_for_nsapp()` call must happen **after** `app.set_menu(menu)`. If you call it before the menu is set on the app, the NSMenu reference may not be connected to the menu bar yet.
+
+</Warning>
+
+## Verifying the fix
+
+After building and installing the app:
+
+1. Open System Preferences > Keyboard > Keyboard Shortcuts > App Shortcuts (or Window Management on Sequoia)
+2. Verify tiling shortcuts are enabled
+3. Focus the Tauri app window
+4. Press a tiling shortcut (e.g., `Fn+Control+Left Arrow` on Sequoia, or your custom shortcut)
+5. The window should snap to the corresponding half/quarter of the screen
+
+## Reference
+
+- [muda #263](https://github.com/tauri-apps/muda/issues/263) — Original bug report (closed, fixed in v0.17.2)
+- [muda #335](https://github.com/tauri-apps/muda/pull/335) — Fix PR (merged April 2026)
+- [Tauri #13605](https://github.com/tauri-apps/tauri/issues/13605) — Downstream issue report
+- [muda #262](https://github.com/tauri-apps/muda/issues/262) — Sequoia tiling icons (separate, still open)
+- [winit #3986](https://github.com/rust-windowing/winit/issues/3986) — Same root cause in winit-based apps

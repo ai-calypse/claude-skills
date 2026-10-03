@@ -1,0 +1,163 @@
+---
+title: Native File Drag-and-Drop
+description: Why browser onDrop never fires in a Tauri WebView, and how to handle OS file drops with onDragDropEvent — plus a dual handler for mock/REST dev modes.
+sidebar_position: 13
+---
+
+## The lost-afternoon bug
+
+You wire up the obvious thing — `onDrop` and `onDragOver` on a container — drag a file from Finder onto your app, and nothing happens. No event fires. You add `console.log` everywhere, double-check `preventDefault`, suspect a CSS overlay swallowing pointer events. Hours go by.
+
+The cause is not your code. **In a Tauri WebView, the browser `onDrop` / `ondragover` DOM events do not fire for OS file drops.** The native window layer intercepts the drag before the WebView ever sees it. Web devs reach for `onDrop` by reflex, see nothing, and lose an afternoon to it.
+
+<Warning>
+
+For OS file drops in Tauri, do **not** rely on the browser `onDrop` event. Subscribe to the WebView's native drag-drop event instead:
+
+```ts
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+
+getCurrentWebviewWindow().onDragDropEvent((event) => {
+  // event.payload.paths is a string[] of FILESYSTEM PATHS
+});
+```
+
+</Warning>
+
+## Paths, not bytes
+
+The most important difference from the web: the native event hands you **filesystem paths**, not `File` objects.
+
+A browser drop gives you `File` instances — you read their contents in the renderer with `FileReader` / `file.arrayBuffer()`. The Tauri native drop gives you `event.payload.paths`, an array of absolute path strings. There are no bytes in the payload at all. To get the contents you call a Rust command that reads the file on the backend (and, for assets like images, imports/copies it on the backend rather than round-tripping the bytes through JS).
+
+This flips the handler's shape. Instead of inspecting `file.type`, you route by **file extension** on the path string, then dispatch to the right Rust command:
+
+```ts
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { getBackend } from "@takazudo/backend-bridge";
+
+const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
+const TEXT_EXTENSIONS = new Set(["md", "mdx", "txt", "markdown"]);
+
+function extOf(filePath: string): string {
+  return filePath.split(".").pop()?.toLowerCase() ?? "";
+}
+
+useEffect(() => {
+  // Browser onDrop does not fire in the Tauri WebView for file drops,
+  // so subscribe to the native event. It provides filesystem paths,
+  // not File objects.
+  if (!("__TAURI_INTERNALS__" in window)) return;
+
+  let unlisten: (() => void) | null = null;
+
+  getCurrentWebviewWindow()
+    .onDragDropEvent(async (event) => {
+      if (event.payload.type !== "drop") return;
+
+      const imagePaths = event.payload.paths.filter((p) =>
+        IMAGE_EXTENSIONS.has(extOf(p)),
+      );
+      const textPaths = event.payload.paths.filter((p) =>
+        TEXT_EXTENSIONS.has(extOf(p)),
+      );
+
+      for (const filePath of imagePaths) {
+        // Backend copies the file into the asset store and returns its name —
+        // the image bytes never travel through JS.
+        const savedName = await getBackend().assets.importFile(filePath);
+        insertImageRef(savedName);
+      }
+
+      for (const filePath of textPaths) {
+        // Backend reads the file from disk by path and returns its text.
+        const text = await getBackend().files.readText(filePath);
+        const basename = filePath.split(/[\\/]/).pop() ?? filePath;
+        await onDropTextFile?.(text, basename);
+      }
+    })
+    .then((fn) => {
+      unlisten = fn;
+    });
+
+  return () => {
+    unlisten?.();
+  };
+}, [insertImageRef, onDropTextFile]);
+```
+
+The `event.payload.type` is one of `"over"`, `"leave"`, or `"drop"` — use `"over"` / `"leave"` to drive your drag-over highlight, and `"drop"` to do the work.
+
+## Why a dual handler
+
+If the native event is the right way in production, why keep the browser `onDrop` at all? Because this app does not always run inside a WebView.
+
+The [backend bridge / adapter pattern](../architecture/backend-bridge.mdx) lets the same frontend run in three modes: full Tauri (native WebView), mock (a real browser, in-memory backend), and REST (a real browser talking to Rust over HTTP). **In the mock and REST modes there is no WebView — the code runs in an ordinary browser tab, where `onDragDropEvent` never fires and the browser `onDrop` is the only event you get.**
+
+So you keep both:
+
+- The **native** `onDragDropEvent` handler, guarded by `"__TAURI_INTERNALS__" in window`, for production.
+- A **browser** `onDrop` fallback for mock/REST dev modes, where the drop gives you real `File` objects you read with `FileReader` / `file.text()`.
+
+```tsx
+import { useCallback } from "react";
+import { getBackend } from "@takazudo/backend-bridge";
+
+const handleDrop = useCallback(
+  async (e: React.DragEvent) => {
+    e.preventDefault();
+
+    // In Tauri the native onDragDropEvent handler already handled the drop;
+    // bail out so we don't process it twice.
+    if ("__TAURI_INTERNALS__" in window) return;
+
+    const files = Array.from(e.dataTransfer.files);
+    for (const file of files) {
+      if (file.type.startsWith("image/")) {
+        // Browser path: read bytes in the renderer, then hand them to the backend.
+        const buf = await file.arrayBuffer();
+        await getBackend().assets.saveFile(file.name, buf);
+      } else {
+        const text = await file.text();
+        await onDropTextFile?.(text, file.name);
+      }
+    }
+  },
+  [onDropTextFile],
+);
+
+return <div onDragOver={(e) => e.preventDefault()} onDrop={handleDrop}>{/* ... */}</div>;
+```
+
+Note the early `return` when running under Tauri — both handlers are mounted, but only one should act. The native handler owns the drop in production; the `onDrop` guard prevents a double-process. (In production the browser `onDrop` would not fire for file drops anyway, but the guard makes the intent explicit and is robust to edge cases.)
+
+<Tip>
+
+The two paths converge on the same Rust commands — `assets.importFile` / `files.readText` from a path, or `assets.saveFile` from bytes. Funnel both into one "import this content" routine so the dual handler does not become two divergent code paths.
+
+</Tip>
+
+## Keep `dragDropEnabled` on
+
+The native event only fires if the WebView's drag-drop handling is enabled in the window config. In `tauri.conf.json`:
+
+```json
+{
+  "app": {
+    "windows": [
+      {
+        "dragDropEnabled": true
+      }
+    ]
+  }
+}
+```
+
+`dragDropEnabled` defaults to `true`, so usually you do nothing. But it is a tempting thing to flip off — for example if some library's HTML5 drag-and-drop (sortable lists, draggable panels) seems to fight the native handler. **If you disable it, `onDragDropEvent` stops firing entirely** and OS file drops silently stop working. If your native drop handler suddenly goes dead, check this flag first.
+
+## Key takeaways
+
+1. **Browser `onDrop` does not fire in the Tauri WebView for OS file drops.** Subscribe to `getCurrentWebviewWindow().onDragDropEvent(...)` instead.
+2. **The native payload gives filesystem paths, not bytes.** Route by extension on `event.payload.paths`, then read/import through Rust commands.
+3. **Keep a browser `onDrop` fallback** for mock/REST dev modes that run in a real browser, where only the browser event fires.
+4. **`dragDropEnabled` must stay enabled** in the window config, or the native event never fires.

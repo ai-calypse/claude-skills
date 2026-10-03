@@ -1,0 +1,146 @@
+---
+title: Architecture
+description: Architecture overview of Tauri v2 wrapper apps with Mermaid diagrams
+sidebar_position: 1
+---
+
+# Architecture Overview
+
+This section covers the architectural patterns used in Tauri v2 macOS wrapper applications. The core idea is straightforward: a Rust binary manages a WebView and optionally spawns background processes, but the details of how this works in practice -- especially across dev and production modes -- require careful design.
+
+## Core Structure
+
+Every Tauri v2 app has three layers:
+
+```mermaid
+graph TB
+  subgraph "Tauri Application"
+    direction TB
+    Rust["Rust Core (main.rs)<br/>Process management<br/>Window lifecycle<br/>Menu system<br/>Tauri commands"]
+    WebView["macOS WebView (WKWebView)<br/>Renders the UI<br/>Runs frontend JavaScript"]
+    Frontend["Frontend Assets<br/>HTML/CSS/JS<br/>Loading page or full SPA"]
+  end
+
+  Rust -->|"creates & controls"| WebView
+  Frontend -->|"bundled into app<br/>via frontendDist"| WebView
+  WebView -->|"invoke() calls"| Rust
+```
+
+The **Rust core** manages everything: window creation, menu handling, process spawning, signal handling, and shutdown. The **WebView** is a thin rendering layer -- it displays whatever URL or HTML the Rust core tells it to. The **frontend** can be as simple as a single loading page HTML file.
+
+## The Sidecar Approach
+
+For apps that wrap a dev server (documentation sites, preview tools), the architecture adds a sidecar process layer:
+
+```mermaid
+graph TB
+  subgraph "Application Process Tree"
+    direction TB
+    Rust["Rust Main Process"]
+    Sidecar["Sidecar Process<br/>(pnpm / Node.js)"]
+    Server["Dev Server<br/>(localhost:PORT)"]
+    WebView["WebView Window"]
+  end
+
+  Rust -->|"spawn with<br/>process_group(0)"| Sidecar
+  Sidecar -->|"starts"| Server
+  WebView -->|"HTTP requests"| Server
+  Rust -->|"polls readiness<br/>then navigates"| WebView
+  Rust -->|"SIGTERM on exit"| Sidecar
+```
+
+The Rust process spawns the sidecar in its own process group. This is essential for clean shutdown -- when the app exits, it can signal the entire process group rather than hunting down individual child processes.
+
+## Dev vs Production Architecture
+
+The architecture changes significantly between dev mode and production mode:
+
+```mermaid
+graph LR
+  subgraph "Dev Mode"
+    direction TB
+    Terminal["Terminal<br/>(full PATH)"]
+    TauriDev["cargo tauri dev"]
+    BeforeDev["beforeDevCommand<br/>(pnpm dev)"]
+    DevServer1["Dev Server<br/>(localhost:PORT)"]
+    WebView1["WebView<br/>(loads devUrl)"]
+
+    Terminal --> TauriDev
+    TauriDev -->|"runs"| BeforeDev
+    BeforeDev -->|"starts"| DevServer1
+    TauriDev -->|"creates"| WebView1
+    WebView1 -->|"loads from"| DevServer1
+  end
+
+  subgraph "Production Mode"
+    direction TB
+    Finder["Finder<br/>(minimal PATH)"]
+    AppBundle[".app Bundle"]
+    RustMain["Rust main()"]
+    FindBin["Find/Bundle<br/>Binary"]
+    Spawn["Spawn Sidecar"]
+    DevServer2["Dev Server<br/>(localhost:PORT)"]
+    LoadingPage["Loading Page<br/>(frontendDist)"]
+    WebView2["WebView"]
+
+    Finder --> AppBundle
+    AppBundle --> RustMain
+    RustMain --> FindBin
+    FindBin --> Spawn
+    Spawn -->|"starts"| DevServer2
+    RustMain -->|"creates with"| LoadingPage
+    LoadingPage --> WebView2
+    RustMain -->|"polls, then<br/>navigates"| WebView2
+    WebView2 -->|"loads from"| DevServer2
+  end
+```
+
+The key differences:
+
+1. **Dev mode** delegates server startup to `beforeDevCommand` and loads directly from `devUrl`
+2. **Production mode** must handle everything itself: finding/bundling the binary, spawning the process, showing a loading page, polling for readiness, then navigating
+
+## State Management
+
+The Rust side manages application state through Tauri's managed state system:
+
+```rust
+struct AppState {
+    sidecar: Arc<Mutex<Option<Sidecar>>>,
+    pnpm_path: Option<PathBuf>,
+    zoom: Mutex<f64>,
+}
+
+// Register during app build
+tauri::Builder::default()
+    .manage(app_state)
+    // ...
+```
+
+State is accessed from menu event handlers, Tauri commands, and the shutdown handler via `app_handle.state::<AppState>()`.
+
+## Process Tree
+
+A running Tauri wrapper app has this process tree:
+
+```mermaid
+graph TD
+  TauriApp["Tauri App (PID 1234)"]
+  SidecarGroup["Process Group (PGID = sidecar PID)"]
+  Sidecar["Sidecar (PID 5678)<br/>pnpm / node"]
+  Children["Child Processes<br/>(spawned by sidecar)"]
+
+  TauriApp -->|"spawns with<br/>process_group(0)"| SidecarGroup
+  SidecarGroup --> Sidecar
+  Sidecar --> Children
+```
+
+Using `process_group(0)` creates a new process group with the sidecar's PID as the group ID. On shutdown, sending `SIGTERM` to `-pid` (negative PID) signals the entire group, ensuring all child processes are cleaned up.
+
+## Section Contents
+
+The pages in this section cover each architectural pattern in detail:
+
+- **[Sidecar Pattern](./sidecar-pattern.mdx)** -- Bundling and managing external binaries
+- **[Loading Screen](./loading-screen.mdx)** -- Showing UI immediately while background work happens
+- **[Process Lifecycle](./process-lifecycle.mdx)** -- Port cleanup, shutdown sequences, and signal handling

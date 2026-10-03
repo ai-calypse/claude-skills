@@ -1,0 +1,165 @@
+---
+title: App Store Review Guideline 4.2
+description: Why WebView-wrapper apps get rejected and what native functionality you need to pass review
+sidebar_position: 7
+---
+
+This is conceptual guidance, not a checklist that guarantees approval. App Store review is inherently subjective. But there are strong patterns in what passes and what doesn't, and if you're shipping a Tauri-wrapped Vite + React app, knowing them ahead of time will save a painful first rejection.
+
+## What Guideline 4.2 Says
+
+From Apple's official [App Store Review Guidelines](https://developer.apple.com/app-store/review/guidelines/):
+
+> **4.2 Minimum Functionality**
+>
+> Your app should include features, content, and UI that elevate it beyond a repackaged website. If your app is not particularly useful, unique, or 'app-like,' it doesn't belong on the App Store.
+
+The phrase "repackaged website" is the key. Apple rejects apps whose only purpose is to show a mobile website inside a WebView. A Tauri app that loads `https://myproduct.com` and does nothing else will get rejected almost every time.
+
+Sub-guidelines that bite most often for WebView-wrapper apps:
+
+- **4.2.1 / 4.2.2** -- Apps that are "little more than a mobile website"
+- **4.2.3** -- Apps that serve primarily as web portals or search engines
+- **4.3** -- Spam / duplication of existing apps
+
+## Why Your Tauri App Might Look Like a "Repackaged Website"
+
+From a reviewer's perspective, these are all red flags:
+
+- No native navigation (no tab bar, no system back gesture feedback)
+- No native share sheet when the user taps "share"
+- `<a href>` links that look like they'd open in Safari
+- Browser-style progress bars
+- Web error pages when offline ("No internet connection -- check your network")
+- Same bundle identifier but no obvious feature advantage over the website
+- No push notifications
+- No platform integration (Photos, Contacts, Calendar, etc.)
+
+Tauri doesn't automatically solve any of these. Your frontend has to add the native surface.
+
+## What Adds "Native-ness"
+
+These are the common levers. You don't need all of them, but you probably need several.
+
+### Push Notifications
+
+APNs push is one of the strongest signals to a reviewer that this is "really an app."
+
+- Requires a paid Apple Developer Program membership (free team cannot use push)
+- Use a Tauri notification plugin or the `tauri-plugin-notification` to request and handle APNs tokens
+- Register the `aps-environment` entitlement and the `UIBackgroundModes` with `remote-notification` in `Info.ios.plist`
+
+Even local notifications scheduled from JS (no server push) help -- they demonstrate the app does something the website cannot.
+
+### Native Share Sheet
+
+When your frontend wants to share content, call `navigator.share()` or invoke a Tauri command that surfaces the iOS `UIActivityViewController`. Either way, the result is the iOS system share sheet -- not an in-page social-media link list.
+
+```ts
+if (navigator.share) {
+  await navigator.share({
+    title: "Check this out",
+    url: "https://example.com/content/123",
+  });
+}
+```
+
+`navigator.share` works in WKWebView on iOS 12.2+ when the Share permission is granted.
+
+### Photo Library / Camera
+
+File input (`<input type="file" accept="image/*">`) triggers the iOS photo picker. With:
+
+```xml title="Info.ios.plist (excerpt)"
+<key>NSPhotoLibraryUsageDescription</key>
+<string>This app attaches photos to your posts.</string>
+<key>NSCameraUsageDescription</key>
+<string>This app lets you take photos to attach to posts.</string>
+```
+
+The user sees the native Photos / Camera UI, which is very different from what a website can do.
+
+### Haptics
+
+WKWebView exposes limited haptics through `navigator.vibrate`, but for real iPhone haptics (selection / impact / notification), you want a Tauri plugin that calls into `UIImpactFeedbackGenerator`.
+
+### Native Back / Tab Bar
+
+For multi-section apps, a native-style tab bar rendered in CSS is fine -- reviewers don't require it to be an actual `UITabBar`. What matters is that navigation looks and feels app-like: fixed to the bottom, thumb-reachable, with clear icons and labels.
+
+A good heuristic: if you removed the WKWebView and replaced it with Safari, would the layout obviously fall apart because it's built for "inside an app"? If yes, you're probably on the right track.
+
+### Offline Handling
+
+If the app just shows "No Internet Connection" like a browser, that's a rejection risk. Ship:
+
+- A custom offline screen with a retry button
+- Cached content from IndexedDB that remains readable offline
+- Clear messaging that does not look like a browser error page
+
+### Widgets (iOS 14+)
+
+Widgets are strong native functionality, but they require:
+
+- A paid Apple Developer Program membership
+- A Widget Extension target in Xcode -- not something Tauri scaffolds automatically
+- Writing SwiftUI code for the widget
+
+This is significant work. Probably overkill for a first submission, but it's a strong 4.2 answer if you have bandwidth.
+
+### Sign in with Apple
+
+Not just polite -- if you offer social sign-in, [Guideline 4.8](https://developer.apple.com/app-store/review/guidelines/#4.8) requires offering Sign in with Apple as well. This requires paid program + entitlement.
+
+## Things That Don't Help as Much as You Might Think
+
+- **"We call it differently on the phone"** -- cosmetic differences don't pass 4.2
+- **A splash screen** -- standard iOS practice, not a differentiator
+- **"We have dark mode"** -- expected baseline, not a feature
+- **A custom error page** -- helps, but alone is not enough
+- **"The website requires mobile browser"** -- doesn't address 4.2
+
+## Practical Minimum for a "Productivity Wrapper"
+
+Shipping a dashboard / note-taking / task-tracker web app as a Tauri iOS app? A reasonable minimum:
+
+- [ ] Native app icon designed for iOS (no web favicon)
+- [ ] Launch screen in `LaunchScreen.storyboard`
+- [ ] Responsive layout that honors safe-area insets
+- [ ] App-like bottom navigation (tab bar or dock)
+- [ ] Local notifications for at least one meaningful event
+- [ ] System share sheet via `navigator.share` on at least one screen
+- [ ] File picker for image attachments (with usage-description plist keys)
+- [ ] Offline screen with retry, not a browser error page
+- [ ] No visible URL bar, progress bar, or other browser chrome
+
+For a consumer-facing social or commerce app, add push notifications and at least one platform integration (Camera, Contacts, or Photos) that's genuinely used by the core flow.
+
+## Screenshots and Metadata
+
+Even a technically native app can trip 4.2 if the App Store Connect metadata screams "we're just a website":
+
+- Don't use screenshots from the desktop web app; take iOS-specific screenshots
+- Use the product name in the marketing copy, not "Our website as an app"
+- Describe features that work uniquely on iOS
+
+## The Appeal Process
+
+If you do get a 4.2 rejection, the appeal is to the App Review Board. You can:
+
+1. Reply via Resolution Center in App Store Connect with details on native features the reviewer may have missed
+2. Request a phone call with App Review
+3. Submit a formal appeal to the Review Board
+
+In practice, a targeted reply pointing out specific native capabilities (usually with screenshots) often gets the decision reversed. If that fails, adding another native feature before resubmitting is the standard play.
+
+## Related Pages
+
+- [Signing With a Free Personal Team](./ios-signing-free-team.mdx) -- many of the native capabilities above require a paid program
+- [WKWebView Gotchas on iOS](./wkwebview-gotchas.mdx) -- making the WebView feel like an app starts with not looking like a web page
+
+## External References
+
+- [Apple: App Store Review Guidelines](https://developer.apple.com/app-store/review/guidelines/)
+- [Apple: 4.2 Minimum Functionality forum thread](https://developer.apple.com/forums/thread/806726)
+- [Tauri: App Store Distribution](https://v2.tauri.app/distribute/app-store/)

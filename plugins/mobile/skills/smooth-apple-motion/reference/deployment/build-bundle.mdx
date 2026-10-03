@@ -1,0 +1,164 @@
+---
+title: Building App Bundles
+description: Building .app bundles with cargo tauri build, configuring targets, icons, and installation
+sidebar_position: 2
+---
+
+# Building App Bundles
+
+The `cargo tauri build` command compiles your Rust backend, bundles the frontend assets, and produces a distributable `.app` bundle for macOS.
+
+## Basic Build
+
+```bash
+cargo tauri build
+```
+
+This runs the full pipeline:
+
+1. Executes `beforeBuildCommand` from `tauri.conf.json` (your frontend build)
+2. Compiles the Rust code in release mode
+3. Embeds the `frontendDist` directory into the binary
+4. Creates the `.app` bundle
+
+<Warning>
+
+**`beforeBuildCommand` must be configured** in `tauri.conf.json` for self-contained apps that embed a frontend (Vite, etc.). Without it, `cargo tauri build` bundles whatever stale files are already in `frontendDist` without rebuilding them. The build succeeds silently but ships old frontend code.
+
+```json
+{
+  "build": {
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  }
+}
+```
+
+If `beforeBuildCommand` is missing, the build may finish suspiciously fast (a few seconds instead of 30+), because Cargo has nothing new to compile.
+
+</Warning>
+
+The output is located at:
+
+```
+target/release/bundle/macos/YourApp.app
+```
+
+## Bundle Configuration
+
+Configure the bundle in `tauri.conf.json`:
+
+```json
+{
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}
+```
+
+### Bundle Targets
+
+The `targets` field controls which bundle formats are created:
+
+| Value | Output |
+|-------|--------|
+| `"all"` | All available formats (`.app`, `.dmg`) |
+| `["app"]` | Only the `.app` bundle |
+| `["dmg"]` | Only the `.dmg` disk image |
+
+For development iteration, building only the `.app` is faster since it skips `.dmg` creation.
+
+### Category
+
+The `category` field sets the macOS application category, which appears in Finder and the App Store. Common values:
+
+- `"DeveloperTool"` -- for developer utilities
+- `"Productivity"` -- for productivity apps
+- `"Utility"` -- for general utilities
+
+### Minimum System Version
+
+```json
+{
+  "macOS": {
+    "minimumSystemVersion": "10.15"
+  }
+}
+```
+
+Set this to the oldest macOS version you want to support. `10.15` (Catalina) is a reasonable minimum for most apps. Setting it lower may cause compatibility issues with newer APIs.
+
+## Icon Configuration
+
+Tauri looks for icons specified in the `bundle.icon` array:
+
+```json
+{
+  "bundle": {
+    "icon": ["icons/icon.png"]
+  }
+}
+```
+
+If the array is empty or omitted, Tauri uses a default icon. For production apps, provide at least one high-resolution PNG (1024x1024 is recommended). Tauri automatically generates the required `.icns` file from it.
+
+<Tip>
+
+The icon path is relative to `tauri.conf.json`. Keep your icon source file in a dedicated `icons/` directory next to the config.
+
+</Tip>
+
+## Installing to /Applications
+
+After building, install the `.app` bundle to `/Applications`:
+
+```bash
+# 1. Kill the running app (if any)
+killall YourApp 2>/dev/null || true
+sleep 1
+
+# 2. Move old bundle away (mv is atomic -- see macOS Pitfalls)
+mv /Applications/YourApp.app /tmp/YourApp-old-$$.app 2>/dev/null || true
+
+# 3. Copy the fresh bundle
+cp -R target/release/bundle/macos/YourApp.app /Applications/
+
+# 4. Clear quarantine (targeted: only removes quarantine, not all xattrs)
+xattr -dr com.apple.quarantine /Applications/YourApp.app
+```
+
+<Warning>
+
+**Never use `cp -rf` to overwrite an existing `.app` bundle.** The binary inside `Contents/MacOS/` may stay stale. Always remove (or move) the old bundle first. See [macOS Deployment Pitfalls](./macos-pitfalls.mdx) for the full explanation.
+
+</Warning>
+
+## Building with Alternative Configs
+
+To build with a different `tauri.conf.json` file:
+
+```bash
+cargo tauri build --config tauri.conf.ztoffice.json
+```
+
+The alternative config is merged on top of the base config, so it only needs to contain the fields that differ. See [Multi-Config](../recipes/multi-config) for details.
+
+## Build Verification
+
+After building, verify the binary is fresh:
+
+```bash
+# Check the binary modification time
+stat -f "%Sm" target/release/bundle/macos/YourApp.app/Contents/MacOS/YourApp
+
+# Verify frontend assets are embedded (if applicable)
+# Search for a known string in the built JS
+grep -l "some-unique-string" target/release/bundle/macos/YourApp.app/Contents/Resources/*
+```
+
+If the timestamp is old or the expected string is missing, see [Cargo Cache Invalidation](./cargo-cache).

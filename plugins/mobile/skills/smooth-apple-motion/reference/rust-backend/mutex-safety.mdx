@@ -1,0 +1,231 @@
+---
+title: Mutex Safety in Tauri Commands
+description: How to safely use Mutex in Tauri v2 commands without crashing your app on poisoned mutexes.
+sidebar_position: 2
+---
+
+## The problem
+
+Tauri commands share application state through `State<AppState>`, where fields are protected by `std::sync::Mutex`. The natural Rust pattern is `.lock().unwrap()`, but in a Tauri application this is dangerous.
+
+If any thread panics while holding a Mutex lock, that Mutex becomes **poisoned**. Every subsequent `.lock().unwrap()` on that Mutex will also panic, taking down the entire application. In a desktop app, a user-triggered panic in one command should not crash the whole program.
+
+<Warning>
+
+Never use `.lock().unwrap()` on a Mutex inside a Tauri command. A single panic anywhere in your app can cascade into total failure through poisoned mutexes.
+
+</Warning>
+
+## The AppState pattern
+
+Define your shared state with `Mutex`-wrapped fields:
+
+```rust
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+pub struct AppState {
+    pub project_root: Mutex<String>,
+    pub settings_cache: Mutex<Option<serde_json::Value>>,
+    pub settings_mtime: Mutex<u64>,
+    pub ptys: Mutex<HashMap<String, PtyInstance>>,
+    pub watchers: Mutex<WatcherState>,
+}
+```
+
+Wrap it in `Arc` when registering with Tauri so background threads can share it:
+
+```rust
+use std::sync::Arc;
+
+fn main() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let app_state = Arc::new(AppState::new(project_root));
+            let http_state = app_state.clone(); // Clone for HTTP server
+            app.manage(app_state);
+
+            // http_state can now be moved into a background task
+            tauri::async_runtime::spawn(async move {
+                http_server::start(http_state, 3001).await;
+            });
+
+            Ok(())
+        })
+        // ...
+}
+```
+
+Commands receive it as `State<'_, Arc<AppState>>`:
+
+```rust
+#[tauri::command]
+pub fn settings_get(state: State<'_, Arc<AppState>>) -> Option<serde_json::Value> {
+    // ...
+}
+```
+
+## Rule 1: Use `.map_err()` in commands
+
+In every Tauri command, convert lock errors into `Result` or `Option` returns. Never unwrap:
+
+```rust
+// GOOD: Graceful error handling
+fn get_project_root_string(state: &AppState) -> Result<String, String> {
+    state
+        .project_root
+        .lock()
+        .map(|r| r.clone())
+        .map_err(|e| format!("Failed to lock project root: {}", e))
+}
+
+#[tauri::command]
+pub fn settings_get(state: State<'_, Arc<AppState>>) -> Option<serde_json::Value> {
+    let root = state
+        .project_root
+        .lock()
+        .map_err(|e| format!("Failed to lock project root: {}", e))
+        .ok()?  // Convert to Option, returning None on error
+        .clone();
+    // ...
+}
+```
+
+```rust
+// BAD: App crashes if mutex is poisoned
+#[tauri::command]
+pub fn settings_get(state: State<'_, Arc<AppState>>) -> Option<serde_json::Value> {
+    let root = state.project_root.lock().unwrap().clone(); // BOOM
+    // ...
+}
+```
+
+For commands that return `bool`, treat lock failure as a silent failure:
+
+```rust
+#[tauri::command]
+pub fn settings_save(
+    state: State<'_, Arc<AppState>>,
+    settings: serde_json::Value,
+) -> bool {
+    let root = match state.project_root.lock() {
+        Ok(r) => r.clone(),
+        Err(_) => return false,  // Graceful degradation
+    };
+    // ...
+}
+```
+
+## Rule 2: Use `.unwrap_or_else()` in background threads
+
+In non-command contexts like file watcher callbacks, you cannot return an error to the frontend. Here, use `.unwrap_or_else(|e| e.into_inner())` to recover the data from a poisoned mutex:
+
+```rust
+// In a watcher background thread
+let stored = content_arc
+    .lock()
+    .unwrap_or_else(|e| e.into_inner());
+```
+
+This works because `PoisonError::into_inner()` gives you the `MutexGuard` even when the mutex is poisoned. The data may be in an inconsistent state, but for read-only checks (like comparing file content), this is acceptable and far better than crashing.
+
+<Tip>
+
+Use `.unwrap_or_else(|e| e.into_inner())` only when you are reading data and can tolerate potential inconsistency. If you are writing critical data, prefer propagating the error.
+
+</Tip>
+
+## Rule 3: Consistent lock ordering
+
+When a function needs to lock multiple `Mutex` fields on `AppState`, always acquire them in the same order to prevent deadlocks:
+
+```rust
+// Lock ordering convention:
+//   1. project_root
+//   2. watchers
+//   3. ptys
+```
+
+This convention should be documented in the code and followed by all functions:
+
+```rust
+pub fn restart_watchers(state: &AppState, app: &AppHandle) {
+    // Lock project_root first (step 1)
+    let project_root = match state.project_root.lock() {
+        Ok(pr) => pr.clone(),
+        Err(_) => return,
+    };
+    // Release project_root lock before locking watchers
+
+    // Lock watchers second (step 2)
+    if let Ok(mut ws) = state.watchers.lock() {
+        ws.messages_watcher = None;
+        // ...
+    }
+}
+```
+
+<Warning>
+
+Never acquire locks in inconsistent order across different functions. If function A locks `project_root` then `watchers`, and function B locks `watchers` then `project_root`, you have a deadlock waiting to happen.
+
+</Warning>
+
+## Rule 4: Minimize lock scope
+
+Hold locks for as short a time as possible. Clone the data you need and release the lock immediately:
+
+```rust
+// GOOD: Clone and release
+let root = state
+    .project_root
+    .lock()
+    .map_err(|e| format!("Failed to lock: {}", e))?
+    .clone();  // Lock released here after clone
+// Now work with `root` without holding the lock
+
+// BAD: Holding lock while doing I/O
+let guard = state.project_root.lock().unwrap();
+let content = fs::read_to_string(&*guard)?; // I/O while holding lock!
+```
+
+## Workspace switching example
+
+The `switch_workspace` method demonstrates safe multi-lock access:
+
+```rust
+impl AppState {
+    pub fn switch_workspace(&self, new_root: String) -> Result<(), String> {
+        // Lock 1: project_root
+        {
+            let mut root = self
+                .project_root
+                .lock()
+                .map_err(|e| format!("Failed to lock project root: {}", e))?;
+            *root = new_root;
+        } // Lock released
+
+        // Lock 2: settings_cache
+        {
+            let mut cache = self
+                .settings_cache
+                .lock()
+                .map_err(|e| format!("Failed to lock settings cache: {}", e))?;
+            *cache = None;
+        } // Lock released
+
+        // Lock 3: settings_mtime
+        {
+            let mut m = self
+                .settings_mtime
+                .lock()
+                .map_err(|e| format!("Failed to lock settings mtime: {}", e))?;
+            *m = 0;
+        } // Lock released
+
+        Ok(())
+    }
+}
+```
+
+Each lock is acquired in its own block, ensuring it is released before the next one is acquired. All errors are propagated as `Result` values.

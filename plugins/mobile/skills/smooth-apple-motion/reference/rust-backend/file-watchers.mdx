@@ -1,0 +1,330 @@
+---
+title: Debounced File Watchers
+description: Generic debounced file watcher pattern with write markers to distinguish app writes from external changes.
+sidebar_position: 4
+---
+
+## The problem
+
+File system watchers (via the `notify` crate) fire events rapidly and redundantly. A single file save can trigger multiple Create and Modify events within milliseconds. Without debouncing, your app will emit duplicate events to the frontend, causing unnecessary re-renders and potential race conditions.
+
+Additionally, you need to distinguish between changes made by your own app and changes made externally (by the user in a text editor, for example). Without this distinction, writing a file from your app triggers a watcher event that bounces back to the frontend as an "external change."
+
+## The debounced watch loop
+
+Instead of duplicating debounce logic for every watcher, extract a generic helper:
+
+```rust
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+use notify::{Event, EventKind};
+
+/// Generic debounced watch loop.
+///
+/// - `rx`: receives raw filesystem events
+/// - `debounce`: how long to wait after the last event before emitting
+/// - `matches_event`: returns `Some(T)` if the event is relevant
+/// - `on_emit`: called with the matched value after the debounce period
+fn debounced_watch_loop<T, F, E>(
+    rx: mpsc::Receiver<Event>,
+    debounce: Duration,
+    matches_event: F,
+    on_emit: E,
+) where
+    T: Send,
+    F: Fn(&Event) -> Option<T>,
+    E: Fn(T),
+{
+    let mut pending: Option<T> = None;
+    let mut last_event_time = Instant::now();
+
+    loop {
+        match rx.recv_timeout(debounce) {
+            Ok(event) => {
+                match event.kind {
+                    EventKind::Create(_) | EventKind::Modify(_) => {}
+                    _ => continue,
+                }
+                if let Some(val) = matches_event(&event) {
+                    pending = Some(val);
+                    last_event_time = Instant::now();
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if pending.is_some()
+                    && last_event_time.elapsed() >= debounce
+                {
+                    if let Some(val) = pending.take() {
+                        on_emit(val);
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+```
+
+<Tip>
+
+The `matches_event` closure returns `Some(T)` to carry extracted data (like a filename) to the `on_emit` callback. Using a return value instead of shared mutable state keeps all captured variables `Send`-safe inside `thread::spawn` closures.
+
+</Tip>
+
+## How the debounce works
+
+```mermaid
+sequenceDiagram
+    participant FS as File System
+    participant RX as Channel Receiver
+    participant Loop as Debounce Loop
+    participant App as on_emit Callback
+
+    FS->>RX: Event 1 (Modify)
+    RX->>Loop: matches_event -> Some(val)
+    Note over Loop: pending = val, reset timer
+    FS->>RX: Event 2 (Modify, 50ms later)
+    RX->>Loop: matches_event -> Some(val)
+    Note over Loop: pending = val, reset timer
+    Note over Loop: recv_timeout expires (200ms)
+    Loop->>App: on_emit(val)
+    Note over Loop: pending = None
+```
+
+The key behavior: each new event resets the timer. The callback only fires after the debounce period elapses with **no new events**. This naturally collapses rapid event bursts into a single emission.
+
+## Using the helper
+
+### Messages directory watcher
+
+Watch a directory for `.md` file changes, debounced at 300ms:
+
+```rust
+pub fn start_messages_watcher(state: &AppState, app: &AppHandle) {
+    let project_root = match state.project_root.lock() {
+        Ok(pr) => pr.clone(),
+        Err(_) => return,
+    };
+
+    let archives_dir = Path::new(&project_root).join("archives");
+    if !archives_dir.is_dir() {
+        return;
+    }
+
+    let app_handle = app.clone();
+    let (tx, rx) = mpsc::channel::<Event>();
+
+    let mut watcher = notify::recommended_watcher(
+        move |res: Result<Event, notify::Error>| {
+            if let Ok(event) = res {
+                let _ = tx.send(event);
+            }
+        },
+    ).expect("watcher creation failed");
+
+    watcher
+        .watch(&archives_dir, RecursiveMode::NonRecursive)
+        .expect("watcher start failed");
+
+    std::thread::spawn(move || {
+        debounced_watch_loop(
+            rx,
+            Duration::from_millis(300),
+            |event| {
+                for path in &event.paths {
+                    if let Some(fname) =
+                        path.file_name().and_then(|n| n.to_str())
+                    {
+                        if fname.ends_with(".md")
+                            && !fname.starts_with("index")
+                        {
+                            return Some(fname.to_string());
+                        }
+                    }
+                }
+                None
+            },
+            |filename| {
+                let _ = app_handle.emit(
+                    "messages:changed",
+                    MessagesChangedPayload { filename },
+                );
+            },
+        );
+    });
+
+    // Store watcher handle to keep it alive
+    if let Ok(mut ws) = state.watchers.lock() {
+        ws.messages_watcher = Some(watcher);
+    }
+}
+```
+
+<Warning>
+
+You must store the watcher handle (e.g., in `AppState`). If it is dropped, the watcher stops. Dropping the watcher also disconnects the channel, which cleanly terminates the `debounced_watch_loop` via `Disconnected`.
+
+</Warning>
+
+## Write markers: distinguishing app writes from external changes
+
+### Content-based marker (for text files)
+
+For text files like drafts, compare the file content against the last content written by the app:
+
+```rust
+// WatcherState stores the last written content
+pub struct WatcherState {
+    /// Last content written by the app to draft.md
+    pub draft_write_content: Arc<Mutex<Option<String>>>,
+    // ...
+}
+```
+
+After the app writes, record the content:
+
+```rust
+pub fn mark_draft_write(
+    state: &AppState,
+    written_content: Option<&str>,
+) {
+    if let Ok(ws) = state.watchers.lock() {
+        if let Ok(mut val) = ws.draft_write_content.lock() {
+            *val = written_content.map(|s| s.to_string());
+        }
+    }
+}
+```
+
+In the watcher callback, compare against the stored content:
+
+```rust
+|_| {
+    if let Ok(content) = fs::read_to_string(&draft_path) {
+        let stored = content_arc
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let is_external = stored.as_deref() != Some(&*content);
+        drop(stored);
+
+        if is_external {
+            let _ = app_handle.emit(
+                "draft:externalChange",
+                DraftExternalChangePayload { content },
+            );
+        }
+    }
+}
+```
+
+<Note>
+
+Content comparison is more robust than mtime comparison for text files. Two rapid writes with the same content will correctly be identified as non-external, even if the mtime changes.
+
+</Note>
+
+### Mtime-based marker (for binary or large files)
+
+For files where content comparison is expensive, use an mtime-based marker:
+
+```rust
+pub struct WatcherState {
+    /// Shared mtime guard for pin write detection.
+    pub pin_write_mtime: Arc<Mutex<u64>>,
+    /// The absolute path of the currently-watched pin file.
+    pub watched_pin_path: Option<String>,
+    // ...
+}
+```
+
+After writing, record the file's mtime:
+
+```rust
+pub fn mark_pin_write(state: &AppState, path: &str) {
+    let ws = match state.watchers.lock() {
+        Ok(ws) => ws,
+        Err(_) => return,
+    };
+
+    // Only update if the written path matches what we're watching
+    if ws.watched_pin_path.as_deref() != Some(path) {
+        return;
+    }
+
+    let mtime = mtime_ms(Path::new(path));
+    if let Ok(mut val) = ws.pin_write_mtime.lock() {
+        *val = mtime;
+    }
+}
+```
+
+In the watcher callback, compare the current mtime against the stored one:
+
+```rust
+|_| {
+    let current_mtime = mtime_ms(&file_path);
+    let last = *mtime_arc
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    if current_mtime > last {
+        let _ = app_handle.emit(
+            "pins:fileChanged",
+            PinFileChangedPayload { entry_path },
+        );
+    }
+}
+```
+
+## Send safety with `Option<T>`
+
+The `debounced_watch_loop` uses `Option<T>` for the `pending` value, where `T` must be `Send`. This is important because the loop runs inside `thread::spawn`.
+
+The `matches_event` closure returns `Option<T>`, which means all the data it extracts must be owned and `Send`-safe. By returning a value rather than mutating shared state, the closure can capture references to `Arc<Mutex<...>>` values without additional synchronization concerns.
+
+```rust
+// This works because String is Send
+debounced_watch_loop(
+    rx,
+    debounce,
+    |event| -> Option<String> {
+        // Extract and return owned data
+        Some(filename.to_string())
+    },
+    |filename: String| {
+        // Consume the owned data
+    },
+);
+```
+
+## Stopping watchers
+
+Drop the watcher handle to stop watching. This disconnects the channel, which terminates the background thread:
+
+```rust
+pub fn stop_watchers(state: &AppState) {
+    if let Ok(mut ws) = state.watchers.lock() {
+        ws.messages_watcher = None; // Drop stops watching
+        ws.draft_watcher = None;
+        ws.pin_watcher = None;
+        ws.watched_pin_path = None;
+
+        // Reset guards
+        if let Ok(mut m) = ws.draft_write_content.lock() {
+            *m = None;
+        }
+        if let Ok(mut m) = ws.pin_write_mtime.lock() {
+            *m = 0;
+        }
+    }
+}
+```
+
+## Key takeaways
+
+1. **Use a generic debounced loop** -- avoid duplicating debounce logic for each watcher
+2. **Content comparison for text files** -- more accurate than mtime for detecting self-writes
+3. **Mtime comparison for large/binary files** -- cheaper than content comparison
+4. **Mark writes immediately after writing** -- call `mark_*_write` right after `fs::write`
+5. **Store watcher handles** -- dropping them stops the watcher
+6. **Use `Arc<Mutex<>>` for shared guards** -- lets both the watcher thread and command handlers access the same marker data

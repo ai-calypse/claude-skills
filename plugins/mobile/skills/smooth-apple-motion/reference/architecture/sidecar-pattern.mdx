@@ -1,0 +1,248 @@
+---
+title: Sidecar Pattern
+description: Bundling and managing Node.js or other binaries as Tauri sidecar processes
+sidebar_position: 2
+---
+
+# Sidecar Pattern
+
+The sidecar pattern bundles a standalone binary (typically Node.js) inside the Tauri `.app` bundle. This makes the app self-contained -- it does not depend on tools installed on the user's system.
+
+## Why Not Use Shell Commands?
+
+The most common first attempt is to shell out to `node` or `pnpm`:
+
+```rust
+// This BREAKS when launched from Finder
+Command::new("pnpm").args(["dev"]).spawn();
+```
+
+<Warning>
+
+This approach fails in production because macOS Finder launches apps with a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`). Your Homebrew-installed `pnpm`, nvm-managed `node`, and other developer tools are not on this PATH. The command simply fails with "No such file or directory".
+
+</Warning>
+
+There are two solutions:
+
+1. **Find the binary at known absolute paths** -- simpler but requires the tool to be installed
+2. **Bundle the binary inside the app** -- fully self-contained, no system dependencies
+
+This page covers the bundled approach (option 2). For the absolute-path approach, see the `find_pnpm()` pattern in [Dev vs Production](../getting-started/dev-vs-production.mdx).
+
+## Step 1: Download the Binary
+
+Create a download script that fetches the Node.js standalone binary for the target platform with checksum verification:
+
+```bash
+#!/usr/bin/env bash
+# scripts/download-node.sh
+# Download Node.js standalone binary for Tauri sidecar bundling.
+
+set -euo pipefail
+
+NODE_VERSION="v24.13.0"
+ARCH="aarch64"
+PLATFORM="darwin"
+TARGET_TRIPLE="${ARCH}-apple-${PLATFORM}"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BINARIES_DIR="${APP_DIR}/binaries"
+OUTPUT="${BINARIES_DIR}/node-${TARGET_TRIPLE}"
+
+URL="https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-darwin-arm64.tar.gz"
+EXPECTED_SHA256="d595961e563fcae057d4a0fb992f175a54d97fcc4a14dc2d474d92ddeea3b9f8"
+
+if [[ -f "${OUTPUT}" ]]; then
+  echo "Node binary already exists at ${OUTPUT}"
+  echo "Delete it first if you want to re-download."
+  exit 0
+fi
+
+mkdir -p "${BINARIES_DIR}"
+
+TMPDIR_DL="$(mktemp -d)"
+trap 'rm -rf "${TMPDIR_DL}"' EXIT
+
+echo "Downloading Node.js ${NODE_VERSION} for macOS arm64..."
+curl -fSL --progress-bar "${URL}" -o "${TMPDIR_DL}/node.tar.gz"
+
+echo "Verifying checksum..."
+ACTUAL_SHA256="$(shasum -a 256 "${TMPDIR_DL}/node.tar.gz" | cut -d ' ' -f 1)"
+if [[ "${ACTUAL_SHA256}" != "${EXPECTED_SHA256}" ]]; then
+  echo "ERROR: SHA256 mismatch!"
+  echo "  Expected: ${EXPECTED_SHA256}"
+  echo "  Actual:   ${ACTUAL_SHA256}"
+  exit 1
+fi
+echo "Checksum OK."
+
+echo "Extracting binary..."
+tar -xzf "${TMPDIR_DL}/node.tar.gz" -C "${TMPDIR_DL}" \
+  --strip-components=2 "node-${NODE_VERSION}-darwin-arm64/bin/node"
+
+mv "${TMPDIR_DL}/node" "${OUTPUT}"
+chmod +x "${OUTPUT}"
+
+echo "Done: ${OUTPUT}"
+echo "Size: $(du -h "${OUTPUT}" | cut -f1)"
+```
+
+Key aspects of this script:
+
+- **SHA256 verification** prevents supply-chain attacks and ensures reproducible builds
+- **Idempotent** -- if the binary already exists, it exits cleanly
+- **Target triple naming** -- the output file is named `node-aarch64-apple-darwin`, which is the convention Tauri expects
+
+<Tip>
+
+Always verify the checksum. Get the expected SHA256 from the official Node.js release page (SHASUMS256.txt) for the specific version you are downloading.
+
+</Tip>
+
+## Step 2: Configure externalBin
+
+In `tauri.conf.json`, declare the binary path (without the target triple suffix):
+
+```json
+{
+  "bundle": {
+    "externalBin": ["binaries/node"]
+  }
+}
+```
+
+Tauri automatically appends the target triple during the build process. So `binaries/node` becomes:
+
+- `binaries/node-aarch64-apple-darwin` on Apple Silicon
+- `binaries/node-x86_64-apple-darwin` on Intel Mac
+
+The binary file in your `binaries/` directory must be named with the full target triple.
+
+## Step 3: Binary Path Resolution in Rust
+
+At runtime, you need to find the bundled binary. The path depends on whether you are in dev or production mode:
+
+```rust
+fn node_binary_path() -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("Failed to get current exe path");
+    let dir = exe.parent().expect("Failed to get exe directory");
+
+    // Dev mode: Tauri keeps the target triple in the filename
+    let target_triple = format!("{}-apple-darwin", std::env::consts::ARCH);
+    let dev_path = dir.join(format!("node-{}", target_triple));
+    if dev_path.exists() {
+        return dev_path;
+    }
+
+    // Production bundle: Tauri strips the target triple
+    dir.join("node")
+}
+```
+
+<Warning>
+
+This is a critical detail that is easy to miss: **Tauri strips the target triple from the binary name in the production bundle**. During development, the binary is at `node-aarch64-apple-darwin`. In the production `.app` bundle, it is just `node`. Your code must handle both cases.
+
+</Warning>
+
+### Why the Path Differs
+
+During `cargo tauri dev`, the binary is copied to the same directory as your compiled Rust binary (inside `target/debug/`), and it keeps its full name including the target triple.
+
+When you run `cargo tauri build`, Tauri bundles the binary inside `Contents/MacOS/` of the `.app` bundle, and it strips the target triple suffix.
+
+```
+# Dev mode directory (target/debug/)
+node-aarch64-apple-darwin    <-- full name with triple
+
+# Production bundle (MyApp.app/Contents/MacOS/)
+node                         <-- triple stripped
+my-app                       <-- your app binary
+```
+
+## Step 4: Check Binary Existence
+
+Always verify the binary exists before attempting to spawn it. A clear error message saves hours of debugging:
+
+```rust
+fn spawn_sidecar() -> Sidecar {
+    let node = node_binary_path();
+
+    if !node.exists() {
+        let msg = format!(
+            "Node binary not found at {}. Run scripts/download-node.sh first.",
+            node.display()
+        );
+        log(&msg);
+        panic!("{msg}");
+    }
+
+    let mut cmd = Command::new(&node);
+    cmd.args(["scripts/dev-stable.js"])
+        .current_dir(&dir)
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_file_clone));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let child = cmd.spawn().expect("Failed to spawn node sidecar");
+    let pid = child.id();
+
+    Sidecar { child, pid }
+}
+```
+
+## Step 5: .gitignore the Binaries
+
+The downloaded binary is large (typically 80-100 MB for Node.js) and platform-specific. Never commit it:
+
+```
+/binaries/
+```
+
+Instead, document the download step in your README or setup script. The download script is the source of truth for which binary version to use.
+
+## Complete File Layout
+
+```
+my-app/
+  Cargo.toml
+  tauri.conf.json              # externalBin: ["binaries/node"]
+  binaries/
+    node-aarch64-apple-darwin  # Downloaded binary (gitignored)
+  scripts/
+    download-node.sh           # Committed download script
+  src/
+    main.rs                    # node_binary_path() + spawn logic
+  frontend/
+    index.html                 # Loading page
+  .gitignore                   # Includes /binaries/
+```
+
+## System Dependency Alternative
+
+If you can assume your users have the right tools installed (common for developer tools), you can skip the sidecar bundling and find the binary at known system paths instead:
+
+```rust
+fn find_pnpm() -> Option<PathBuf> {
+    let candidates = [
+        "/opt/homebrew/bin/pnpm",  // Apple Silicon Homebrew
+        "/usr/local/bin/pnpm",     // Intel Homebrew
+    ];
+    for p in &candidates {
+        let path = PathBuf::from(p);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+```
+
+This is simpler but ties the app to the user's system configuration. The bundled sidecar approach is preferred for distribution.

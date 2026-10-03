@@ -1,0 +1,300 @@
+---
+title: Settings Validation Pattern
+description: A shared TypeScript validation layer that enforces types, ranges, enums, and migrates legacy field names
+sidebar_position: 8
+---
+
+# Settings Validation Pattern
+
+Desktop apps accumulate settings over time. Fields get renamed, value ranges change, old formats need migration. The `validateSettings()` function in the shared `app-defaults` package provides a single validation boundary that every consumer passes settings through.
+
+## The Problem
+
+Settings come from disk (a JSON file edited by users and older app versions). They can contain:
+
+- **Wrong types** -- A string where a number is expected
+- **Out-of-range values** -- Font size of 200, opacity of -1
+- **Old field names** -- `general.theme` was renamed to `general.colorScheme`
+- **Missing fields** -- New settings added in a later version
+- **Invalid enums** -- `cursorStyle: "triangle"` when only `"block" | "underline" | "bar"` is valid
+
+Without validation, these issues cause runtime crashes or silent misbehavior.
+
+## The Settings Schema
+
+The `AppSettings` type defines the full shape:
+
+```ts
+export interface AppSettings {
+  general: {
+    projectRoot: string;
+    colorScheme: string;
+    formatOnArchive: boolean;
+    windowOpacity: number;       // 0.3 - 1.0
+    useAiTitleSummarize: boolean;
+    displayScale: number;         // discrete steps: 0.75, 0.9, 1.0, ...
+  };
+  pins: PinConfig[];
+  color: ColorSettings;           // 16 semantic color hex values
+  activeDraft: number;            // 1-99
+  draftCount: number;             // 1-99
+  editor: {
+    vimMode: boolean;
+    fontFamily: string;
+    fontSize: number;             // 10-24
+    lineHeight: number;           // 1.0-2.0
+    paddingHorizontal: number;    // 0-48
+    paddingVertical: number;      // 0-48
+    typewriterScrolling: boolean;
+    showStatusBar: boolean;
+    markdownListIndent: boolean;
+    listHangingIndent: boolean;
+    showIndentGuides: boolean;
+    indentType: "tab" | "spaces";
+    indentSize: number;           // 1-8
+  };
+  vim: VimSettings;
+  terminal: {
+    fontSize: number;             // 10-24
+    fontFamily: string;
+    lineHeight: number;           // 1.0-2.0
+    cursorStyle: "block" | "underline" | "bar";
+    shell: string;
+  };
+  shortcuts: { /* 35+ shortcut bindings */ };
+  layout: {
+    terminalPosition: "top" | "right" | "bottom" | "left";
+    terminalVisible: boolean;
+    terminalSize: number;         // 10-90
+  };
+  fontCandidates: string[];
+  sync: SyncSettings;
+}
+```
+
+## The validateSettings() Function
+
+The function takes `unknown` input and returns a fully typed `AppSettings` or `null`:
+
+```ts
+export function validateSettings(settings: unknown): AppSettings | null {
+  if (!settings || typeof settings !== "object" || Array.isArray(settings))
+    return null;
+
+  const s = settings as Record<string, any>;
+
+  // ... migrations ...
+  // ... field validation ...
+
+  return {
+    general: { /* validated fields */ },
+    editor: { /* validated fields */ },
+    // ...
+  };
+}
+```
+
+### Type Checking with Defaults
+
+Each field is validated individually with a fallback to the default value:
+
+```ts
+editor: {
+  vimMode:
+    typeof s.editor?.vimMode === "boolean"
+      ? s.editor.vimMode
+      : defaultEditorSettings.vimMode,
+
+  fontSize:
+    typeof s.editor?.fontSize === "number" &&
+    s.editor.fontSize >= 10 &&
+    s.editor.fontSize <= 24
+      ? s.editor.fontSize
+      : defaultEditorSettings.fontSize,
+
+  lineHeight:
+    typeof s.editor?.lineHeight === "number" &&
+    s.editor.lineHeight >= 1.0 &&
+    s.editor.lineHeight <= 2.0
+      ? s.editor.lineHeight
+      : defaultEditorSettings.lineHeight,
+}
+```
+
+The pattern is consistent: check type, check range, use default if invalid.
+
+### Enum Validation
+
+For fields with a fixed set of values:
+
+```ts
+cursorStyle: ["block", "underline", "bar"].includes(s.terminal?.cursorStyle)
+  ? s.terminal.cursorStyle
+  : defaultTerminalSettings.cursorStyle,
+
+terminalPosition: ["top", "right", "bottom", "left"].includes(s.layout?.terminalPosition)
+  ? s.layout.terminalPosition
+  : defaultLayoutSettings.terminalPosition,
+```
+
+### Hex Color Validation
+
+Color settings are validated with a regex:
+
+```ts
+const hexColorPattern = /^#[0-9a-fA-F]{6}$/;
+
+function validateHexColor(value: unknown, fallback: string): string {
+  return typeof value === "string" && hexColorPattern.test(value)
+    ? value
+    : fallback;
+}
+```
+
+### Display Scale Snapping
+
+The display scale uses discrete preset steps. Invalid values snap to the nearest valid step:
+
+```ts
+function snapToNearestScale(value: unknown): number {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return defaultGeneralSettings.displayScale;
+  }
+  let closest = VALID_DISPLAY_SCALES[0];
+  let minDiff = Math.abs(value - closest);
+  for (const scale of VALID_DISPLAY_SCALES) {
+    const diff = Math.abs(value - scale);
+    if (diff < minDiff) {
+      minDiff = diff;
+      closest = scale;
+    }
+  }
+  return closest;
+}
+```
+
+If a user manually edits the settings file and writes `displayScale: 1.3`, it snaps to `1.25` (the nearest valid step).
+
+## Field Migrations
+
+When field names change across versions, the validator migrates old names:
+
+```ts
+// Migration: rename general.theme / general.colorSchema -> general.colorScheme
+const colorSchemeValue =
+  typeof s.general?.colorScheme === "string"
+    ? s.general.colorScheme
+    : typeof s.general?.colorSchema === "string"
+      ? s.general.colorSchema
+      : typeof s.general?.theme === "string"
+        ? s.general.theme
+        : defaultGeneralSettings.colorScheme;
+```
+
+This reads from three possible field names in priority order: `colorScheme` (current), `colorSchema` (typo from v1), `theme` (original name).
+
+More migrations:
+
+```ts
+// shortcuts.navSkills -> shortcuts.navPins
+if (s.shortcuts?.navSkills && !s.shortcuts?.navPins) {
+  s.shortcuts.navPins = s.shortcuts.navSkills;
+}
+
+// activeTab -> activeDraft, tabCount -> draftCount
+if (s.activeTab !== undefined && s.activeDraft === undefined) {
+  s.activeDraft = s.activeTab;
+}
+
+// shortcuts.tab1-tab10 -> shortcuts.draft1-draft10
+for (let i = 1; i <= 10; i++) {
+  const oldKey = `tab${i}`;
+  const newKey = `draft${i}`;
+  if (s.shortcuts[oldKey] !== undefined && s.shortcuts[newKey] === undefined) {
+    s.shortcuts[newKey] = s.shortcuts[oldKey];
+  }
+}
+
+// layout.direction + layout.swapped -> layout.terminalPosition
+terminalPosition: s.layout?.direction === "vertical"
+  ? (s.layout?.swapped ? "bottom" : "top")
+  : s.layout?.direction === "horizontal"
+    ? (s.layout?.swapped ? "right" : "left")
+    : defaultLayoutSettings.terminalPosition,
+```
+
+<Note>
+
+Migrations are checked before validation. This means a settings file from any past version of the app will load correctly -- old field names are mapped to current names, then validated.
+
+</Note>
+
+## Pins Validation
+
+Pins (configurable content directories) require special handling because users edit them through the settings UI. Partially filled entries should not be discarded:
+
+```ts
+const rawPins = Array.isArray(s.pins) ? s.pins : [];
+const validPins = rawPins
+  .filter((p) =>
+    p && typeof p.path === "string" && typeof p.title === "string"
+  )
+  .filter((p) =>
+    p.path.trim() !== "" || p.title.trim() !== ""  // Keep if either field is non-empty
+  )
+  .map((p) => ({
+    path: p.path,
+    title: p.title,
+    ...(p.type === "file" || p.type === "directory" ? { type: p.type } : {}),
+    ...(typeof p.favorite === "boolean" ? { favorite: p.favorite } : {}),
+  }));
+
+const pins = validPins.length > 0 ? validPins : [...defaultPinsSettings];
+```
+
+This preserves partially-edited entries (where only the path or title is filled in) but removes completely empty ones.
+
+## Default Values
+
+The `defaults.ts` file defines sensible defaults for every setting:
+
+```ts
+export const defaultSettings: AppSettings = {
+  general: {
+    projectRoot: "",
+    colorScheme: "default-dark",
+    formatOnArchive: false,
+    windowOpacity: 1.0,
+    useAiTitleSummarize: false,
+    displayScale: 1.0,
+  },
+  editor: {
+    vimMode: true,
+    fontFamily: "JetBrains Mono",
+    fontSize: 14,
+    lineHeight: 1.6,
+    // ...
+  },
+  // ...
+};
+```
+
+These defaults are used:
+
+1. **When a field is missing or invalid** -- The validator returns the default
+2. **When scaffolding a new workspace** -- The scaffold merges user overrides with defaults
+3. **In the mock adapter** -- The mock backend starts with default settings
+
+## Where Validation Runs
+
+The `validateSettings()` function is called by:
+
+- **Tauri frontend** -- After loading settings from the backend, before rendering
+- **App scaffold** -- When generating a new workspace's `.zudotext.settings.json`
+- **Mock adapter** -- When initializing the in-memory settings store
+
+This shared validation layer (in the `@takazudo/app-defaults` package) ensures consistent behavior regardless of which consumer loads the settings.
+
+## Key Takeaway
+
+The validation pattern follows a clear structure: **check type, check range, apply default, migrate old names**. By centralizing this in a shared package, every consumer gets the same guarantees. Field renames become zero-cost migrations that happen transparently on load, and invalid values from manual editing or old versions are silently corrected rather than crashing the app.

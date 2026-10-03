@@ -1,0 +1,268 @@
+---
+title: Menu Event Handlers
+description: Correctly handle menu events in Tauri v2 without blocking the main thread.
+sidebar_position: 5
+---
+
+## The critical rule
+
+<Warning>
+
+`on_menu_event` runs on the **main thread**. Never perform blocking operations (I/O, network, process management) directly inside the handler. Blocking the main thread freezes the entire application UI.
+
+</Warning>
+
+## Menu creation
+
+Tauri v2 provides two styles for building menus. Both work; choose based on complexity.
+
+### Builder style (simpler menus)
+
+Use `SubmenuBuilder` for straightforward menus:
+
+```rust
+use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+
+let app_menu = SubmenuBuilder::new(app, "MyApp")
+    .about(None)
+    .separator()
+    .quit()
+    .build()?;
+
+let edit_menu = SubmenuBuilder::new(app, "Edit")
+    .undo()
+    .redo()
+    .separator()
+    .cut()
+    .copy()
+    .paste()
+    .select_all()
+    .build()?;
+
+let view_menu = SubmenuBuilder::new(app, "View")
+    .item(
+        &MenuItemBuilder::with_id("refresh", "Refresh")
+            .accelerator("CmdOrCtrl+R")
+            .build(app)?,
+    )
+    .item(
+        &MenuItemBuilder::with_id("devtools", "Toggle Developer Tools")
+            .accelerator("CmdOrCtrl+Alt+I")
+            .build(app)?,
+    )
+    .separator()
+    .item(
+        &MenuItemBuilder::with_id("zoom_in", "Zoom In")
+            .accelerator("CmdOrCtrl+=")
+            .build(app)?,
+    )
+    .item(
+        &MenuItemBuilder::with_id("zoom_out", "Zoom Out")
+            .accelerator("CmdOrCtrl+-")
+            .build(app)?,
+    )
+    .build()?;
+
+let menu = MenuBuilder::new(app)
+    .item(&app_menu)
+    .item(&edit_menu)
+    .item(&view_menu)
+    .build()?;
+
+app.set_menu(menu)?;
+```
+
+### Explicit style (full control)
+
+Use `Menu::new`, `Submenu::new`, and `PredefinedMenuItem` for complete control:
+
+```rust
+use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
+
+let handle = app.handle();
+let menu = Menu::new(handle)?;
+
+// App menu (macOS only)
+#[cfg(target_os = "macos")]
+{
+    let app_menu = Submenu::new(handle, "zudotext", true)?;
+    app_menu.append(
+        &PredefinedMenuItem::about(handle, Some("About zudotext"), None)?,
+    )?;
+    app_menu.append(&PredefinedMenuItem::separator(handle)?)?;
+    app_menu.append(&PredefinedMenuItem::services(handle, None)?)?;
+    app_menu.append(&PredefinedMenuItem::separator(handle)?)?;
+    app_menu.append(&PredefinedMenuItem::hide(handle, None)?)?;
+    app_menu.append(&PredefinedMenuItem::hide_others(handle, None)?)?;
+    app_menu.append(&PredefinedMenuItem::show_all(handle, None)?)?;
+    app_menu.append(&PredefinedMenuItem::separator(handle)?)?;
+    app_menu.append(&PredefinedMenuItem::quit(handle, None)?)?;
+    menu.append(&app_menu)?;
+}
+
+// File menu with custom items
+let file_menu = Submenu::new(handle, "File", true)?;
+file_menu.append(
+    &tauri::menu::MenuItemBuilder::with_id("new_window", "New Window")
+        .accelerator("CmdOrCtrl+N")
+        .build(handle)?,
+)?;
+file_menu.append(&PredefinedMenuItem::separator(handle)?)?;
+file_menu.append(
+    &PredefinedMenuItem::close_window(handle, None)?,
+)?;
+menu.append(&file_menu)?;
+
+app.set_menu(menu)?;
+```
+
+<Note>
+
+Predefined menu items (Copy, Paste, Undo, etc.) are handled automatically by the OS and do not appear in `on_menu_event`. Only custom items with `MenuItemBuilder::with_id()` trigger the handler.
+
+</Note>
+
+## Event handling patterns
+
+### Non-blocking: webview eval (safe on main thread)
+
+Simple webview evaluations are fast and safe to run directly in the handler:
+
+```rust
+app.on_menu_event(|app_handle, event| {
+    let id = event.id().0.as_str();
+    match id {
+        "reload" => {
+            if let Some(w) = app_handle.get_webview_window("main") {
+                let _ = w.eval("window.location.reload()");
+            }
+        }
+        "toggle_devtools" => {
+            if let Some(w) = app_handle.get_webview_window("main") {
+                if w.is_devtools_open() {
+                    w.close_devtools();
+                } else {
+                    w.open_devtools();
+                }
+            }
+        }
+        "zoom_in" => {
+            if let Some(w) = app_handle.get_webview_window("main") {
+                let _ = w.eval(
+                    "{ const z = Math.min(3, \
+                       parseFloat(document.body.style.zoom || '1') * 1.1); \
+                     document.body.style.zoom = z.toString(); }",
+                );
+            }
+        }
+        _ => {}
+    }
+});
+```
+
+### Blocking: spawn a background thread
+
+For operations that involve I/O (sidecar management, file operations, network requests), spawn a thread:
+
+```rust
+app.on_menu_event(|app_handle, event| {
+    match event.id().as_ref() {
+        "refresh" => {
+            // Clone handle for the background thread
+            let handle = app_handle.clone();
+            std::thread::spawn(move || {
+                do_refresh(&handle); // This does I/O, waits for server
+            });
+        }
+        _ => {}
+    }
+});
+```
+
+<Warning>
+
+The `do_refresh` function in this example kills a sidecar process, waits for a port to become available, spawns a new process, and polls for readiness. Any of these operations could block for seconds. Running them on the main thread would freeze the app.
+
+</Warning>
+
+### Timeout polling pattern
+
+When polling for a dev server or sidecar readiness, use a `bool` flag checked against `Instant::elapsed()`:
+
+```rust
+fn wait_for_ready(timeout: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        let code = check_ready();
+        if code != "000" && code != "err" {
+            // Server is ready
+            return;
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    // Timeout reached
+    eprintln!("Server did not respond within timeout");
+}
+```
+
+<Tip>
+
+Use `Instant::now()` and `elapsed()` for timeout checks instead of re-computing elapsed time from a stored `SystemTime`. `Instant` is monotonic and immune to system clock adjustments.
+
+</Tip>
+
+## Creating windows from menu handlers
+
+Creating a new window from a menu handler requires the `AppHandle`, not the `App` reference:
+
+```rust
+"new_window" => {
+    if let Err(e) = window::create_main_window(&handle) {
+        eprintln!("Failed to create new window: {e}");
+    }
+}
+```
+
+Window creation itself is not blocking I/O, so it can be done directly in the handler. However, if the window creation triggers a dev server poll (as in the development workflow), that polling must be spawned on a background thread inside `create_main_window`.
+
+## Registering the handler
+
+Keep menu creation and event handling in a dedicated module:
+
+```rust
+// native/menu.rs
+pub fn create_menu(app: &tauri::App) -> tauri::Result<Menu<tauri::Wry>> {
+    // ... build menu
+}
+
+pub fn register_menu_handler(app: &tauri::App) {
+    let handle = app.handle().clone();
+    app.on_menu_event(move |app_handle, event| {
+        // ... handle events
+    });
+}
+```
+
+Call both from `setup()`:
+
+```rust
+.setup(|app| {
+    let menu = native::menu::create_menu(app)?;
+    app.set_menu(menu)?;
+    native::menu::register_menu_handler(app);
+    Ok(())
+})
+```
+
+## Key takeaways
+
+1. **Never block `on_menu_event`** -- it runs on the main thread
+2. **Use `thread::spawn` for I/O** -- clone `AppHandle` and move it into the thread
+3. **Webview eval is safe** -- `w.eval()` is non-blocking and fine on the main thread
+4. **Predefined items do not trigger `on_menu_event`** -- only custom `MenuItemBuilder::with_id` items do
+5. **Use `Instant` for timeouts** -- monotonic clock, not affected by system time changes
+6. **Separate creation from handling** -- keep `create_menu` and `register_menu_handler` as distinct functions
+
+## Related
+
+- [macOS Window Tiling Shortcuts](./macos-window-tiling.mdx) -- if you have a Window submenu, you must register it with `set_as_windows_menu_for_nsapp()` for macOS tiling to work

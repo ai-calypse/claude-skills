@@ -1,0 +1,230 @@
+---
+title: Display Scale System
+description: A CSS custom property approach to scaling the entire UI without browser zoom, using discrete preset steps
+sidebar_position: 5
+---
+
+# Display Scale System
+
+Tauri apps run in a WebView, but browser-native zoom (`Ctrl+/Ctrl-`) causes layout problems -- text reflows, scrollbars shift, and pixel-aligned components break. The display scale system replaces browser zoom with a CSS custom property (`--display-scale`) that scales fonts, spacing, and dimensions uniformly across the entire app.
+
+## The Problem with Browser Zoom
+
+Browser zoom scales the entire viewport by adjusting the CSS pixel ratio. In a Tauri desktop app, this causes several issues:
+
+- **Layout shifts** -- Panels that are split at a fixed pixel ratio suddenly overflow or collapse
+- **Terminal misalignment** -- xterm.js calculates character cells from font metrics; changing the pixel ratio desynchronizes the grid
+- **CodeMirror glitches** -- The editor measures line heights and gutter widths at initialization; zoom changes invalidate these measurements
+- **No persistence** -- Browser zoom resets between sessions and cannot be saved in app settings
+
+## The `--display-scale` Approach
+
+Instead of changing the browser zoom level, the app sets a single CSS custom property on the document root:
+
+```ts
+import { VALID_DISPLAY_SCALES } from "@takazudo/app-defaults";
+
+export function applyDisplayScale(scale: number): void {
+  const validScale = (VALID_DISPLAY_SCALES as readonly number[]).includes(scale)
+    ? scale
+    : 1.0;
+  document.documentElement.style.setProperty(
+    "--display-scale",
+    String(validScale),
+  );
+}
+```
+
+Every scalable dimension in the app references this variable through `calc()`:
+
+```css
+/* Dialog dimensions scale with --display-scale */
+width: calc(680px * var(--display-scale, 1));
+height: calc(480px * var(--display-scale, 1));
+
+/* Status bar height */
+--status-bar-height: calc(26px * var(--display-scale, 1));
+
+/* Sidebar width */
+width: calc(180px * var(--display-scale, 1));
+```
+
+## Discrete Preset Steps
+
+Rather than allowing arbitrary zoom levels (which cause sub-pixel rendering artifacts), the system uses a fixed set of discrete steps:
+
+```ts
+export const VALID_DISPLAY_SCALES = [
+  0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0
+] as const;
+```
+
+This gives users 8 choices from 75% to 200%. The `validateSettings()` function snaps any out-of-range value to the nearest valid step:
+
+```ts
+function snapToNearestScale(value: unknown): number {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return defaultGeneralSettings.displayScale;
+  }
+  let closest = VALID_DISPLAY_SCALES[0];
+  let minDiff = Math.abs(value - closest);
+  for (const scale of VALID_DISPLAY_SCALES) {
+    const diff = Math.abs(value - scale);
+    if (diff < minDiff) {
+      minDiff = diff;
+      closest = scale;
+    }
+  }
+  return closest;
+}
+```
+
+<Tip>
+
+The discrete approach avoids sub-pixel blurriness that occurs at arbitrary zoom levels like 1.13x or 1.67x. Each step is chosen to produce clean pixel multiples for common base font sizes (13px, 14px, 16px).
+
+</Tip>
+
+## How Each Component Scales
+
+### CodeMirror Editor
+
+The editor multiplies its configured font size and padding by the display scale in JavaScript:
+
+```ts
+const displayScale = appSettings?.general?.displayScale ?? 1;
+
+const scaledFontSize = settings.fontSize * displayScale;
+const scaledPaddingH = settings.paddingHorizontal * displayScale;
+const scaledPaddingV = settings.paddingVertical * displayScale;
+```
+
+This ensures CodeMirror's internal measurements remain accurate -- it initializes with the already-scaled values rather than being scaled after the fact.
+
+### xterm Terminal
+
+The terminal also applies the scale factor to its font size:
+
+```ts
+const displayScale = settings?.general?.displayScale ?? 1;
+const term = new Terminal({
+  fontSize: Math.round(termSettings.fontSize * displayScale),
+  // ...
+});
+```
+
+When the display scale changes at runtime, the terminal updates its font size and re-fits:
+
+```ts
+useEffect(() => {
+  const newFontSize = Math.round(termFontSize * displayScale);
+  if (term.options.fontSize !== newFontSize) {
+    term.options.fontSize = newFontSize;
+    fitAddon.fit();
+  }
+}, [displayScale, termFontSize]);
+```
+
+### Dialogs and Fixed-Width Panels
+
+Dialogs use `calc()` in inline styles to scale their dimensions:
+
+```tsx
+<div
+  style={{
+    width: "calc(680px * var(--display-scale, 1))",
+    height: "calc(480px * var(--display-scale, 1))",
+  }}
+>
+  {/* Settings dialog content */}
+</div>
+```
+
+The `var(--display-scale, 1)` fallback ensures the layout works even if the CSS property is not set.
+
+## Preventing Native Zoom
+
+To prevent the user from accidentally triggering browser zoom (which would stack with the display scale), native zoom gestures are intercepted and redirected:
+
+```ts
+export function preventNativeZoom(): void {
+  // Ctrl+wheel -> display scale change
+  window.addEventListener('wheel', (e) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const direction = e.deltaY < 0 ? "in" : "out";
+      window.dispatchEvent(
+        new CustomEvent("display-scale-change", { detail: { direction } })
+      );
+    }
+  }, { passive: false });
+
+  // Ctrl+/-/0 -> display scale change
+  window.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    if (e.key === '+' || e.key === '=') {
+      e.preventDefault();
+      window.dispatchEvent(
+        new CustomEvent("display-scale-change", { detail: { direction: "in" } })
+      );
+    } else if (e.key === '-') {
+      e.preventDefault();
+      window.dispatchEvent(
+        new CustomEvent("display-scale-change", { detail: { direction: "out" } })
+      );
+    } else if (e.key === '0') {
+      e.preventDefault();
+      window.dispatchEvent(
+        new CustomEvent("display-scale-change", { detail: { direction: "reset" } })
+      );
+    }
+  });
+
+  // Prevent pinch-to-zoom on trackpad
+  document.addEventListener('gesturestart', (e) => e.preventDefault());
+  document.addEventListener('gesturechange', (e) => e.preventDefault());
+  document.addEventListener('gestureend', (e) => e.preventDefault());
+}
+```
+
+The React app listens for the `display-scale-change` custom event and steps through the preset list accordingly.
+
+## Settings UI
+
+The display scale selector in the settings dialog presents the presets as a row of buttons:
+
+```tsx
+<div className="flex gap-xs flex-wrap">
+  {VALID_DISPLAY_SCALES.map((scale) => {
+    const isActive = (values.displayScale ?? 1.0) === scale;
+    return (
+      <button
+        key={scale}
+        className={isActive ? "bg-accent text-on-accent" : "bg-base border-edge"}
+        onClick={() => onChange({ displayScale: scale })}
+      >
+        {getDisplayScaleLabel(scale)}
+      </button>
+    );
+  })}
+</div>
+```
+
+The `getDisplayScaleLabel()` helper converts the numeric value to a percentage string:
+
+```ts
+export function getDisplayScaleLabel(scale: number): string {
+  return `${Math.round(scale * 100)}%`;
+}
+```
+
+## Key Takeaway
+
+The display scale system demonstrates a pattern for scaling desktop web apps:
+
+1. **Intercept native zoom** -- Prevent `Ctrl+/-` and pinch-to-zoom from affecting the WebView
+2. **Use a CSS custom property** -- Set `--display-scale` on the document root
+3. **Scale dimensions via `calc()`** -- Multiply fixed pixel values by the variable
+4. **Scale programmatic components in JS** -- CodeMirror and xterm need their font sizes set in JavaScript, not CSS
+5. **Use discrete steps** -- Avoid sub-pixel artifacts by restricting to clean preset values
+6. **Persist in settings** -- The scale factor is part of the app settings, validated and migrated like any other setting

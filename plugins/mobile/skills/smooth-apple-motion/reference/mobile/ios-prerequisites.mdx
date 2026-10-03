@@ -1,0 +1,197 @@
+---
+title: iOS Prerequisites
+description: Xcode, Rust targets, CocoaPods, and Apple ID setup for Tauri v2 iOS development
+sidebar_position: 2
+---
+
+Everything here is a one-time setup per development machine. Skipping any of these will break `cargo tauri ios init` or `cargo tauri ios dev` later in confusing ways.
+
+## macOS Is Required
+
+iOS development is macOS-only. You cannot build for iOS on Linux or Windows, not even with Tauri. Apple's toolchain (`xcodebuild`, code signing, simulator runtimes) ships only for macOS.
+
+## Install Full Xcode
+
+The Command Line Tools alone are **not enough** for iOS. You need the full Xcode IDE.
+
+1. Install Xcode from the Mac App Store or from [developer.apple.com/xcode/resources](https://developer.apple.com/xcode/resources/)
+2. Launch it once so it can finish setup, accept the license, and install the extra components
+3. Agree to the license on the CLI:
+
+```bash
+sudo xcodebuild -license accept
+```
+
+<Warning>
+
+Downloading Xcode from the App Store can stall. If that happens, grab the `.xip` from the Apple Developer site directly. Keep a backup of the `.xip` somewhere -- updating Xcode is slow and occasionally painful.
+
+</Warning>
+
+## Install Xcode Command Line Tools
+
+Even with full Xcode, the standalone CLT bundle has to be installed so that `xcrun` and friends work from the shell:
+
+```bash
+xcode-select --install
+```
+
+Verify:
+
+```bash
+xcode-select -p
+# Should print: /Applications/Xcode.app/Contents/Developer
+```
+
+If the path points somewhere else, reset it:
+
+```bash
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+```
+
+## Install Homebrew (If Not Already)
+
+Nearly everything else is easier via Homebrew:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+## Install CocoaPods
+
+Tauri's iOS build uses CocoaPods under the hood to wire the Rust static library into the Xcode project.
+
+```bash
+brew install cocoapods
+```
+
+## Add the Rust iOS Targets
+
+Tauri compiles your Rust code for three iOS-family targets. Add all of them:
+
+```bash
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+```
+
+| Target                  | Used for                                    |
+| ----------------------- | ------------------------------------------- |
+| `aarch64-apple-ios`     | Physical iPhones and iPads (ARM64)          |
+| `aarch64-apple-ios-sim` | Simulator on Apple Silicon Macs (ARM64)     |
+| `x86_64-apple-ios`      | Simulator on Intel Macs (legacy but useful) |
+
+<Note>
+
+On an Apple Silicon Mac you rarely need `x86_64-apple-ios`, but installing it is cheap and future-proofs the setup if you ever test on a legacy Intel Mac.
+
+</Note>
+
+## Install the Tauri CLI (v2)
+
+Use whichever installation path you already use on desktop:
+
+```bash
+# Rust-native
+cargo install tauri-cli --version "^2.0.0"
+
+# or with binstall (faster)
+cargo binstall tauri-cli
+
+# or as an npm dev dependency in the project
+pnpm add -D @tauri-apps/cli
+```
+
+Verify:
+
+```bash
+cargo tauri --version
+# tauri-cli 2.x.y
+```
+
+## Apple ID vs Apple Developer Program
+
+This is one of the most confusing parts, so it's worth being explicit.
+
+| Path                          | Cost          | What You Can Do                                                     | Limitations                                                       |
+| ----------------------------- | ------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Free Apple ID (Personal Team) | Free          | Run apps on simulator and on your own physical devices              | 7-day provisioning profile, no push/iCloud/App Groups, no TestFlight |
+| Apple Developer Program       | USD 99 / year | TestFlight, App Store, all capabilities, 1-year provisioning profiles | Annual renewal, must complete identity verification                |
+
+For "can I ship my Vite + React web app to my own iPhone to play with?" the free Apple ID is enough. For anything you want to hand to another human, you need the paid program.
+
+See [Signing With a Free Personal Team](./ios-signing-free-team.mdx) for the full picture and the upgrade path.
+
+## Sign In to Xcode
+
+Before you try to build for a physical device, register your Apple ID in Xcode:
+
+1. Open Xcode
+2. `Xcode` > `Settings` > `Accounts`
+3. Click `+` in the bottom-left and sign in with your Apple ID
+4. The row appears with a team named `Your Name (Personal Team)` (for free) or your paid team
+
+You will reference this team later in `tauri.conf.json > bundle > iOS > developmentTeam`.
+
+## Enable Developer Mode on the iPhone
+
+Starting with iOS 16, Apple hides Developer Mode by default. If your iPhone is going to run a self-signed or dev-signed Tauri build, Developer Mode has to be on.
+
+1. Connect the iPhone to the Mac via cable
+2. On the iPhone: `Settings` > `Privacy & Security` > `Developer Mode` (the entry only appears once a device has been used for development at least once)
+3. Toggle on, restart when prompted, confirm with the device passcode
+4. First time connecting to a new Mac, tap `Trust This Computer` on the iPhone
+
+<Info>
+
+If `Developer Mode` does not show up in `Privacy & Security`, connect the device to Xcode first (`Window` > `Devices and Simulators`), let Xcode prepare the device, then re-check Settings. The entry appears after Xcode has probed the device.
+
+</Info>
+
+## Quick Sanity Check
+
+Before starting your Tauri project, verify every piece works in isolation:
+
+```bash
+# Xcode points at the right place
+xcode-select -p
+
+# Rust iOS targets are installed
+rustup target list --installed | grep apple-ios
+
+# Tauri CLI runs
+cargo tauri --version
+
+# Cocoapods is reachable
+pod --version
+
+# Your Apple ID is registered in Xcode
+# (visual check in Xcode > Settings > Accounts)
+```
+
+If all of these return something sensible, you are ready to move on to [iOS Project Structure](./ios-project-structure.mdx).
+
+## Common Pitfalls
+
+### "No iOS SDK installed"
+
+Xcode was downloaded but never launched. Launch it once. Accept the license. Let it finish installing components.
+
+### `xcodebuild: error: SDK "iphoneos" cannot be located`
+
+`xcode-select` is pointing at the Command Line Tools instead of full Xcode:
+
+```bash
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+```
+
+### `cargo tauri ios init` fails with `pod: command not found`
+
+CocoaPods is not installed or not on `PATH`. Install with `brew install cocoapods` and open a new shell.
+
+### Rustup target missing
+
+If `cargo tauri ios build` complains about an unknown target, it is almost always a missing `rustup target add`. Re-run the three `rustup target add` lines above.
+
+## Official Docs
+
+- [Tauri Prerequisites](https://v2.tauri.app/start/prerequisites/)
+- [Enabling Developer Mode on a Device (Apple)](https://developer.apple.com/documentation/xcode/enabling-developer-mode-on-a-device)

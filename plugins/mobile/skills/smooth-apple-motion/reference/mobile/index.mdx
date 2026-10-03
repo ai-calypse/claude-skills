@@ -1,0 +1,63 @@
+---
+title: Tauri Mobile (iOS)
+description: Using Tauri v2 to wrap a web frontend as a native iOS app
+sidebar_position: 1
+---
+
+## What Tauri Mobile Is
+
+Tauri v2 (stable since October 2, 2024) added first-class targets for iOS and Android on top of the existing desktop targets. On iOS, a Tauri app is a thin Swift shell that embeds the system `WKWebView` and loads your frontend assets. The Rust backend compiles to a static library and is called from Swift via FFI. From the frontend's perspective it feels like a browser, except the `@tauri-apps/api` bridge is available for IPC into Rust.
+
+In practice, for a Vite + React web app that already runs on the desktop, the mobile story is: "take your existing `frontendDist`, point Tauri at it, ship it as an iOS app."
+
+## Stability Status
+
+- **Desktop (macOS/Windows/Linux)** -- stable, production-grade
+- **iOS and Android** -- stable API in v2.0.0, but not all desktop plugins are available yet. The Tauri team has been explicit that 2.0 is **not** the "mobile as a first-class citizen" release -- it's a solid foundation, not the finished story
+- **iOS ecosystem** -- plugins for dialog, fs, notification, geolocation, haptics, etc. exist; plugins that hook deep into macOS APIs (windowing, menubars, dock) obviously do not
+
+<Info>
+
+If you have a working Vite + React web app and want it on iOS, Tauri Mobile is a viable path. If you need deep native iOS integration (widgets, App Intents, SwiftUI views inside your app), you are probably better served by a different stack.
+
+</Info>
+
+## Why Use Tauri for iOS Over Capacitor or React Native
+
+| Concern                 | Tauri Mobile                                     | Capacitor                                  | React Native                                 |
+| ----------------------- | ------------------------------------------------ | ------------------------------------------ | -------------------------------------------- |
+| UI layer                | System WebView (WKWebView on iOS)                | System WebView (WKWebView on iOS)          | Native views bridged from JS                 |
+| Backend language        | Rust (shared with desktop)                       | TypeScript + Swift plugins                 | JavaScript + Objective-C/Swift bridges       |
+| Bundle size (iOS)       | Small (Rust compiles tight, system WebView used) | Small (system WebView)                     | Medium (ships JS runtime + bridge)           |
+| Memory footprint        | Low                                              | Medium                                     | Medium-high                                  |
+| Frontend-framework lock | None (bring your own Vite/webpack setup)         | None                                       | React only                                   |
+| Desktop parity          | Excellent (same Rust backend)                    | Weak (Electron story is separate)          | Weak (React Native for Windows/macOS varies) |
+| Native-API reach        | Growing, Rust plugins only                       | Large plugin ecosystem, easy to write more | Largest native ecosystem of the three        |
+| Maturity on iOS         | 1.x year since stable                            | Many years                                 | Many years                                   |
+
+The honest summary:
+
+- **Pick Tauri** when you already have a Tauri desktop app and want a consistent codebase across desktop and mobile
+- **Pick Capacitor** when your app is web-first and mobile-first, you need many native plugins, and desktop is a nice-to-have
+- **Pick React Native** when you need rich native UI performance on mobile and are willing to rewrite the web version
+
+## What This Category Covers
+
+These notes are focused on iOS specifically, from the perspective of wrapping an existing Vite + React web app.
+
+- [iOS Prerequisites](./ios-prerequisites.mdx) -- Xcode, Rust iOS targets, CocoaPods, Apple ID, Developer Mode
+- [iOS Project Structure](./ios-project-structure.mdx) -- what `cargo tauri ios init` generates, the `gen/apple/` directory, `Info.ios.plist`, and `bundle.iOS` config fields
+- [iOS Dev Loop](./ios-dev-loop.mdx) -- simulator, physical device, `TAURI_DEV_HOST`, Vite config, ATS, Safari Web Inspector
+- [Signing With a Free Personal Team](./ios-signing-free-team.mdx) -- the 7-day provisioning profile, blocked capabilities, upgrade path
+- [WKWebView Gotchas on iOS](./wkwebview-gotchas.mdx) -- safe-area-inset, keyboard, scrolling, service workers, cookies
+- [App Store Review 4.2](./app-store-review-4-2.mdx) -- why WebView-wrapper apps get rejected and what native surface you need to pass
+- [iOS Input Auto-Zoom on Focus](./ios-input-auto-zoom.mdx) -- why `WKWebView` zooms into inputs under 16px and how to prevent it without disabling pinch-zoom
+- [iOS Native Plugins](./native-plugins.mdx) -- loading `tauri-plugin-haptics` and `tauri-plugin-notification` via guarded dynamic import so the same frontend bundle runs on web, desktop, and iOS without crashing
+
+## Official Docs
+
+- [Tauri Prerequisites](https://v2.tauri.app/start/prerequisites/)
+- [Tauri Develop](https://v2.tauri.app/develop/)
+- [iOS Code Signing](https://v2.tauri.app/distribute/sign/ios/)
+- [Submitting to the App Store](https://v2.tauri.app/distribute/app-store/)
+- [Tauri Configuration Reference](https://v2.tauri.app/reference/config/)

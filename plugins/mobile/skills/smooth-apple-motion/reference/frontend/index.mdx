@@ -1,0 +1,122 @@
+---
+title: Frontend Integration Patterns
+description: Patterns for integrating frontend frameworks with Tauri v2 IPC, capabilities, and platform-specific behavior.
+sidebar_position: 1
+---
+
+This section covers frontend integration patterns for Tauri v2 applications. The frontend runs inside a platform webview (WKWebView on macOS, WebView2 on Windows) and communicates with the Rust backend through IPC commands.
+
+## What you will find here
+
+### IPC Commands
+
+The bridge between your frontend and Rust backend. The [IPC Commands](./ipc-commands.mdx) page covers command registration, function signatures, state access, error handling, and async patterns with real examples.
+
+### useEffect Pitfall
+
+A subtle but severe performance bug specific to Tauri's webview. The [useEffect Pitfall](./use-effect-pitfall.mdx) page explains why `useLayoutEffect` with IPC calls causes the macOS beach ball and how to fix it.
+
+### Playwright Testing Pitfall
+
+Tauri uses different rendering engines per platform (WebKit on macOS/Linux, Chromium on Windows). Running Playwright tests only in Chromium gives false confidence. The [Playwright Testing](./playwright-engine-pitfall.mdx) page explains the engine mismatch and how to build a layered testing strategy.
+
+### Capabilities and Permissions
+
+Tauri v2 uses a capabilities system to control what the frontend can access. The [Capabilities](./capabilities.mdx) page covers the permission model, plugin access, and security considerations.
+
+### Asset Protocol and CSP Scope
+
+`convertFileSrc` turns a local file path into an `asset://` URL the WebView can load directly. Whether that URL actually loads depends on your Content Security Policy and the `assetProtocol` scope in `tauri.conf.json`. The [Asset Protocol](./asset-protocol.mdx) page explains the `csp: null` shortcut, the allowlist approach for hardened builds, and why images go blank when you tighten security.
+
+### Bypassing CORS with plugin-http
+
+A plain browser `fetch` in the Tauri WebView is subject to CORS just like any browser. The [plugin-http CORS](./http-plugin-cors.mdx) page shows how `@tauri-apps/plugin-http` routes requests through Rust's `reqwest` client, bypassing the WebView's CORS enforcement entirely.
+
+### Deep Links and the useEffect Teardown Race
+
+A custom URL scheme lets the OS launch or foreground your app and deliver a URL. The [Deep Links](./deep-links.mdx) page covers `tauri-plugin-deep-link` registration, platform guards, and the async teardown race that leaks the URL handler in a React effect.
+
+### Native File Drag-and-Drop
+
+Browser `onDrop` does not fire for OS file drops in a Tauri WebView -- the native window layer intercepts the drag first. The [Drag and Drop](./drag-drop.mdx) page explains why, shows the correct `onDragDropEvent` subscription, and covers a dual-handler pattern for mock/REST dev modes.
+
+## The IPC model
+
+Tauri v2 uses a message-passing architecture between the frontend and the Rust backend:
+
+```mermaid
+sequenceDiagram
+    participant FE as Frontend (WebView)
+    participant IPC as Tauri IPC Bridge
+    participant RS as Rust Backend
+
+    FE->>IPC: invoke("command_name", { args })
+    IPC->>RS: Route to #[tauri::command] fn
+    RS->>RS: Access State<AppState>
+    RS->>RS: Perform work (I/O, compute)
+    RS-->>IPC: Return Result<T, String>
+    IPC-->>FE: Promise resolves/rejects
+```
+
+Key characteristics:
+
+- **Asynchronous by default** -- `invoke()` returns a `Promise`
+- **JSON serialization** -- arguments and return values are serialized via serde
+- **Type-safe on the Rust side** -- commands are regular Rust functions with typed parameters
+- **String errors** -- Tauri commands return `Result<T, String>` for error handling
+
+## Frontend framework compatibility
+
+These patterns work with any frontend framework. The Tauri `invoke()` API is framework-agnostic:
+
+```tsx
+// React
+import { invoke } from "@tauri-apps/api/core";
+
+useEffect(() => {
+  invoke("settings_get").then((settings) => {
+    setSettings(settings);
+  });
+}, []);
+```
+
+```tsx
+// Svelte
+import { invoke } from "@tauri-apps/api/core";
+
+onMount(async () => {
+  const settings = await invoke("settings_get");
+});
+```
+
+```tsx
+// Vue
+import { invoke } from "@tauri-apps/api/core";
+
+onMounted(async () => {
+  const settings = await invoke("settings_get");
+});
+```
+
+## Events from Rust to frontend
+
+The Rust backend can push events to the frontend using `AppHandle::emit()`:
+
+```rust
+// Rust side
+app_handle.emit("messages:changed", payload)?;
+```
+
+```tsx
+// Frontend side
+import { listen } from "@tauri-apps/api/event";
+
+const unlisten = await listen("messages:changed", (event) => {
+  console.log("File changed:", event.payload.filename);
+});
+
+// Clean up on unmount
+onCleanup(() => unlisten());
+```
+
+This bidirectional communication model (invoke for frontend-to-backend, emit/listen for backend-to-frontend) is the foundation for building responsive Tauri applications.

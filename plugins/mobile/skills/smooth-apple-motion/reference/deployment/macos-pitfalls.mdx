@@ -1,0 +1,192 @@
+---
+title: macOS Deployment Pitfalls
+description: Critical macOS-specific deployment issues that cause subtle, hard-to-debug failures
+sidebar_position: 3
+---
+
+# macOS Deployment Pitfalls
+
+This page documents the single most frustrating debugging issue in Tauri macOS deployment. If you spend hours wondering why your latest code changes are not taking effect after a build, this is almost certainly why.
+
+## The #1 Pitfall: cp -rf is BROKEN for .app Bundles
+
+<Warning>
+
+**Never use `cp -rf` to overwrite an existing `.app` bundle. Always remove the old `.app` first, then copy.**
+
+```bash
+# WRONG - binary inside stays stale
+cp -rf target/release/bundle/macos/MyApp.app /Applications/
+
+# CORRECT - remove first, then copy
+rm -rf /Applications/MyApp.app
+cp -r target/release/bundle/macos/MyApp.app /Applications/
+```
+
+</Warning>
+
+### Why This Happens
+
+A `.app` bundle is a directory structure:
+
+```
+MyApp.app/
+  Contents/
+    MacOS/
+      MyApp              <-- The actual binary
+    Resources/
+      ...
+    Info.plist
+```
+
+When you `cp -rf` a new `.app` over an existing one, macOS's `cp` command behaves unexpectedly:
+
+- It copies new and changed files into the existing directory
+- But **the binary inside `Contents/MacOS/` may not be replaced** if it is currently in use, cached by the kernel, or has certain file flags
+- The result: the `.app` bundle looks new (new `Info.plist`, new resources), but **the actual executable is the old version**
+
+You end up running old code with new metadata, which produces incredibly confusing behavior. Your changes are not showing up, your logs say the right version, but the behavior is wrong.
+
+### The Correct Procedure
+
+Always follow this sequence:
+
+```bash
+# 1. Kill the running app (if any)
+killall MyApp 2>/dev/null || true
+
+# 2. Wait briefly for process to exit
+sleep 1
+
+# 3. Move old bundle away (not rm -- mv is atomic via rename())
+mv /Applications/MyApp.app /tmp/MyApp-old-$$.app 2>/dev/null || true
+
+# 4. Copy the fresh bundle
+cp -R target/release/bundle/macos/MyApp.app /Applications/
+
+# 5. Clear quarantine (targeted: only removes quarantine, not all xattrs)
+xattr -dr com.apple.quarantine /Applications/MyApp.app
+```
+
+<Note>
+
+Step 3 uses `mv` instead of `rm -rf`. On the same filesystem, `mv` calls `rename()` which is atomic -- the old bundle disappears in one operation with no partial state. Using `rm -rf` can leave a partially-deleted bundle if interrupted.
+
+Step 5 uses `xattr -dr com.apple.quarantine` instead of `xattr -cr`. The `-dr` flag removes only the quarantine attribute recursively, while `-cr` removes all extended attributes. For local development, the targeted approach is safer.
+
+</Note>
+
+### Verify the Binary is Fresh
+
+After installing, verify that the binary timestamp matches your build:
+
+```bash
+# Check when the binary was last modified
+stat -f "%Sm" /Applications/MyApp.app/Contents/MacOS/MyApp
+
+# Compare with the source
+stat -f "%Sm" target/release/bundle/macos/MyApp.app/Contents/MacOS/MyApp
+```
+
+Both timestamps should be identical (or within seconds of each other). If the `/Applications/` binary has an older timestamp, the copy did not work correctly.
+
+<Tip>
+
+Create a shell alias or script for the install procedure so you never accidentally use `cp -rf`:
+
+```bash
+# ~/.zshrc
+install-tauri() {
+  local app_name="${1:?Usage: install-tauri AppName}"
+  killall "$app_name" 2>/dev/null || true
+  sleep 1
+  mv "/Applications/${app_name}.app" "/tmp/${app_name}-old-$$.app" 2>/dev/null || true
+  cp -R "target/release/bundle/macos/${app_name}.app" /Applications/
+  xattr -dr com.apple.quarantine "/Applications/${app_name}.app"
+  echo "Installed ${app_name}.app"
+}
+```
+
+</Tip>
+
+## Other macOS Issues
+
+### App Translocation
+
+macOS may "translocate" apps that are opened for the first time from certain locations (like the Downloads folder). Translocation copies the app to a random temporary directory and runs it from there, which breaks relative paths.
+
+Clearing the quarantine attribute with `xattr -cr` prevents this:
+
+```bash
+xattr -cr /Applications/MyApp.app
+```
+
+### Launch Services Cache
+
+macOS maintains a database (Launch Services) that tracks app registrations, document types, URL handlers, and icons. When you replace a `.app` bundle at the same path, Launch Services may still show stale metadata (old icon, old document type associations) because it only re-registers automatically if the app's modification time is newer.
+
+If Finder shows stale app info after a correct install:
+
+```bash
+# Force re-register the app
+touch /Applications/MyApp.app
+/System/Library/Frameworks/CoreServices.framework/Frameworks/\
+LaunchServices.framework/Support/lsregister -f /Applications/MyApp.app
+
+# Nuclear option: rebuild the entire Launch Services database
+/System/Library/Frameworks/CoreServices.framework/Frameworks/\
+LaunchServices.framework/Support/lsregister \
+  -kill -r -domain local -domain system -domain user
+killall Finder
+```
+
+<Note>
+
+The full database rebuild is rarely needed. Try the targeted `lsregister -f` first. The nuclear `lsregister -kill -r` resets all app registrations system-wide and can take a while to rebuild.
+
+</Note>
+
+### Code Signature Verification
+
+After replacing a `.app` bundle, you can verify the code signature is valid:
+
+```bash
+# Verify code signature
+codesign --verify --deep --strict --verbose=2 /Applications/MyApp.app
+
+# Check Gatekeeper assessment (bypassing cache to get fresh result)
+spctl --assess --type execute --verbose --ignore-cache /Applications/MyApp.app
+```
+
+If `spctl` gives inconsistent results without `--ignore-cache`, the Gatekeeper assessment cache is stale. The `--ignore-cache` flag forces a fresh assessment.
+
+### Gatekeeper Warnings
+
+Unsigned apps trigger Gatekeeper warnings. For development, you can bypass this by:
+
+1. Right-clicking the app and selecting "Open" (instead of double-clicking)
+2. Or clearing extended attributes: `xattr -cr /Applications/MyApp.app`
+
+For distribution, you will need to sign and notarize the app through Apple's developer program.
+
+### Binary Code Signature
+
+Even in development, if you modify the binary inside the `.app` bundle after it was created by Tauri, the code signature becomes invalid. macOS may refuse to run the app or show a "damaged" error.
+
+If you see this after a correct install, try:
+
+```bash
+codesign --remove-signature /Applications/MyApp.app
+xattr -cr /Applications/MyApp.app
+```
+
+## Summary Checklist
+
+Before reporting "my changes are not showing up":
+
+1. Did you `mv` or `rm -rf` the old `.app` before copying? (Not `cp -rf`)
+2. Did you `killall` the running app first?
+3. Do the binary timestamps match between source and installed?
+4. Did you clear quarantine with `xattr -dr com.apple.quarantine`?
+5. Did you verify the frontend assets are actually embedded? (See [Cargo Cache](./cargo-cache))
+6. Is Finder showing stale info? Try `lsregister -f` to re-register the app

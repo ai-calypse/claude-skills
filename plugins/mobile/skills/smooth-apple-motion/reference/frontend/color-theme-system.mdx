@@ -1,0 +1,288 @@
+---
+title: Color Theme System
+description: A two-tier color architecture from 16-color palettes to semantic CSS custom properties
+sidebar_position: 7
+---
+
+# Color Theme System
+
+The color theme system uses a two-tier architecture: **Tier 1** defines a 16-color palette (like a terminal color scheme), and **Tier 2** derives semantic tokens (background, accent, danger, hover states) from palette indices. Both tiers are exposed as CSS custom properties for use in Tailwind CSS utilities and component styles.
+
+## Tier 1: Color Palette
+
+Each color scheme defines a 16-color palette, matching the standard terminal color convention (8 normal + 8 bright colors):
+
+```ts
+export interface ColorScheme {
+  name: string;
+  label: string;
+  isDark: boolean;
+  background: ColorRef;    // Palette index or direct color
+  foreground: ColorRef;
+  cursor: ColorRef;
+  selectionBg: ColorRef;
+  selectionFg: ColorRef;
+  palette: [
+    string, string, string, string, // 0-3: black, red, green, yellow
+    string, string, string, string, // 4-7: blue, magenta, cyan, white
+    string, string, string, string, // 8-11: bright variants
+    string, string, string, string, // 12-15: bright variants
+  ];
+  semantic?: { /* Tier 2 overrides */ };
+}
+```
+
+The `ColorRef` type allows referencing colors by palette index (number) or by direct hex value (string):
+
+```ts
+export type ColorRef = number | string;
+```
+
+This flexibility lets schemes reference their own palette entries or use custom colors not in the palette:
+
+```ts
+// "default-dark" references palette indices
+{
+  background: 0,    // palette[0] = "#1C1C1C"
+  foreground: 7,    // palette[7] = "#A0A0A0"
+  cursor: 6,        // palette[6] = "#90A1B9"
+}
+
+// "catppuccin-mocha" uses direct hex values
+{
+  background: "#1e1e2e",
+  foreground: "#cdd6f4",
+  cursor: "#f5e0dc",
+}
+```
+
+## Built-in Schemes
+
+The package ships with 10 color schemes:
+
+| Scheme | Type | Description |
+|--------|------|-------------|
+| `default-dark` | Dark | Custom warm dark theme with semantic overrides |
+| `default-light` | Light | Custom light theme with semantic overrides |
+| `catppuccin-mocha` | Dark | Catppuccin pastel palette (mocha variant) |
+| `catppuccin-latte` | Light | Catppuccin pastel palette (latte variant) |
+| `tokyo-night` | Dark | Tokyo Night color scheme |
+| `dracula` | Dark | Dracula classic theme |
+| `nord` | Dark | Arctic, north-bluish palette |
+| `solarized-dark` | Dark | Ethan Schoonover's Solarized (dark) |
+| `one-dark` | Dark | Atom One Dark theme |
+| `gruvbox-dark` | Dark | Retro groove colors |
+
+## Tier 2: Semantic Tokens
+
+Raw palette colors are not meaningful for UI components. "Use palette[3]" does not convey intent. Semantic tokens bridge this gap:
+
+```ts
+export interface ColorSettings {
+  bgPrimary: string;
+  bgSecondary: string;
+  bgSurface: string;
+  textPrimary: string;
+  textSecondary: string;
+  accent: string;
+  accentSubtle: string;
+  border: string;
+  danger: string;
+  dangerStrong: string;
+  onAccent: string;       // Text color on accent background
+  hoverOverlay: string;
+  hoverBg: string;
+  hoverFg: string;
+  selection: string;
+  cursor: string;
+}
+```
+
+### Deriving Semantic Colors
+
+The `schemaToColors()` function generates semantic tokens from a scheme's palette:
+
+```ts
+export function schemaToColors(scheme: ColorScheme): ColorSettings {
+  const p = scheme.palette;
+  const bg = resolveColor(scheme.background, p, p[0]);
+  const fg = resolveColor(scheme.foreground, p, p[15]);
+  const sem = resolveSemanticColors(scheme);
+
+  return {
+    bgPrimary: bg,
+    bgSecondary: sem.bgSecondary,
+    bgSurface: sem.surface,
+    textPrimary: fg,
+    textSecondary: sem.textSecondary,
+    accent: sem.accent,
+    accentSubtle: sem.accentSubtle,
+    border: sem.border,
+    danger: sem.danger,
+    dangerStrong: sem.dangerStrong,
+    onAccent: sem.onAccent,
+    hoverOverlay: sem.hoverOverlay,
+    hoverBg: sem.hoverBg,
+    hoverFg: sem.hoverFg,
+    selection: resolveColor(scheme.selectionBg, p, p[8]),
+    cursor: resolveColor(scheme.cursor, p, p[6]),
+  };
+}
+```
+
+### Semantic Overrides
+
+Schemes can override the default palette-to-semantic mapping via the `semantic` object. This is essential because different palettes need different mappings to look correct:
+
+```ts
+// "default-dark" overrides several semantic tokens
+semantic: {
+  bgSecondary: "bg",    // Use background color (special ref)
+  surface: 0,           // Palette index 0
+  accent: 3,            // Palette index 3 (yellow)
+  accentSubtle: 12,     // Palette index 12
+  border: 8,            // Palette index 8
+  onAccent: "bg",       // Text on accent = background color
+  hoverOverlay: 13,
+  hoverBg: 13,
+  hoverFg: 11,
+}
+```
+
+The special string values `"bg"` and `"fg"` reference the scheme's resolved background and foreground colors, enabling self-referential definitions.
+
+### Default Fallbacks
+
+When a scheme does not provide semantic overrides, defaults are used:
+
+```ts
+export const SEMANTIC_DEFAULTS: Record<string, number> = {
+  bgSecondary: 0,
+  surface: 0,
+  textSecondary: 15,
+  accent: 3,
+  accentSubtle: 3,
+  border: 0,
+  danger: 1,
+  dangerStrong: 9,
+  onAccent: 9,
+  hoverOverlay: 15,
+  hoverBg: 8,
+  hoverFg: 7,
+};
+```
+
+For schemes without overrides (e.g., Catppuccin, Tokyo Night), the system also generates computed fallbacks using color mixing:
+
+```ts
+accentSubtle: colorMixAlpha(accentColor, 0.1, bg),  // 10% accent over background
+hoverOverlay: colorMixAlpha(fg, 0.03, bg),           // 3% foreground over background
+hoverBg: colorMixAlpha(fg, 0.1, bg),                 // 10% foreground over background
+```
+
+## CSS Custom Properties
+
+### Tier 1: Palette Variables
+
+Applied to `:root` by the `applyTheme()` function:
+
+```ts
+export function applyTheme(themeName: string): ColorScheme {
+  const scheme = getSchemeByName(themeName);
+  const root = document.documentElement;
+  const p = scheme.palette;
+
+  root.style.setProperty("--palette-bg", resolveColor(scheme.background, p, p[0]));
+  root.style.setProperty("--palette-fg", resolveColor(scheme.foreground, p, p[15]));
+  root.style.setProperty("--palette-cursor", resolveColor(scheme.cursor, p, p[6]));
+  root.style.setProperty("--palette-selection", resolveColor(scheme.selectionBg, p, p[8]));
+  for (let i = 0; i <= 15; i++) {
+    root.style.setProperty(`--palette-${i}`, p[i]);
+  }
+  return scheme;
+}
+```
+
+This gives CSS access to `--palette-0` through `--palette-15`, `--palette-bg`, `--palette-fg`, etc.
+
+### Tier 2: Semantic Variables
+
+Applied by the `applyColors()` function:
+
+```ts
+const colorKeyToCssVar: Record<keyof ColorSettings, string> = {
+  bgPrimary: "--theme-bg-primary",
+  bgSecondary: "--theme-bg-secondary",
+  bgSurface: "--theme-bg-surface",
+  textPrimary: "--theme-text-primary",
+  textSecondary: "--theme-text-secondary",
+  accent: "--theme-accent",
+  accentSubtle: "--theme-accent-subtle",
+  border: "--theme-border",
+  danger: "--theme-danger",
+  dangerStrong: "--theme-danger-strong",
+  onAccent: "--theme-on-accent",
+  hoverOverlay: "--theme-hover-overlay",
+  hoverBg: "--theme-hover-bg",
+  hoverFg: "--theme-hover-fg",
+  selection: "--theme-selection",
+  cursor: "--theme-cursor",
+};
+```
+
+Components use semantic variables rather than palette indices:
+
+```css
+/* Good: semantic intent is clear */
+.sidebar { background: var(--theme-bg-secondary); }
+.button { background: var(--theme-accent); color: var(--theme-on-accent); }
+.error { color: var(--theme-danger); }
+
+/* Avoid: palette indices have no semantic meaning */
+.sidebar { background: var(--palette-0); }
+```
+
+## xterm Integration
+
+The terminal needs its own theme object (not CSS variables). The `toXtermTheme()` function converts a `ColorScheme` to xterm's `ITheme` format:
+
+```ts
+export function toXtermTheme(scheme: ColorScheme) {
+  const p = scheme.palette;
+  return {
+    background: resolveColor(scheme.background, p, p[0]),
+    foreground: resolveColor(scheme.foreground, p, p[15]),
+    cursor: resolveColor(scheme.cursor, p, p[6]),
+    black: p[0],
+    red: p[1],
+    green: p[2],
+    yellow: p[3],
+    blue: p[4],
+    // ...all 16 ANSI colors
+  };
+}
+```
+
+A custom DOM event (`zudotext:scheme-changed`) notifies the terminal component when the scheme changes, so it can re-apply the xterm theme.
+
+## Color Utility Functions
+
+The package includes utilities for color manipulation:
+
+```ts
+// Mix two hex colors at a given ratio
+colorMix("#ff0000", "#0000ff", 0.5) // -> purple
+
+// Blend foreground over background with alpha
+colorMixAlpha(fg, 0.1, bg) // -> 10% fg over bg
+
+// HSL conversion for programmatic color manipulation
+hexToHsl("#1C1C1C") // -> { h: 0, s: 0, l: 11 }
+
+// Determine readable text color for a background
+contrastTextColor("#1C1C1C") // -> "#ffffff"
+```
+
+## Key Takeaway
+
+The two-tier system separates **what colors are available** (palette) from **what they mean** (semantic tokens). Schemes only need to define 16 palette colors and optionally override semantic mappings. The system handles the rest: generating hover states, computing subtle variants, setting CSS variables, and converting to format-specific theme objects. This keeps themes consistent across the editor, terminal, UI components, and Tailwind utilities.

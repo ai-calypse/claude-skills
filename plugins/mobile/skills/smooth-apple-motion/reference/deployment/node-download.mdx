@@ -1,0 +1,221 @@
+---
+title: Bundling Node.js
+description: Download script for including a standalone Node.js binary with your Tauri app
+sidebar_position: 5
+---
+
+# Bundling Node.js
+
+Some Tauri apps need to run Node.js as a sidecar process (for example, to run a dev server or a build tool). Rather than requiring the user to have Node.js installed, you can bundle a standalone Node.js binary with your app.
+
+## Why Bundle Node.js
+
+- **No user-side dependency** -- the app works out of the box
+- **Version pinning** -- you control exactly which Node.js version runs
+- **Reproducibility** -- no surprises from different Node.js versions on different machines
+
+## Download Script
+
+The following bash script downloads a Node.js standalone binary for the target platform, verifies its SHA256 checksum, extracts it, and renames the binary with a target triple suffix (which Tauri requires for sidecar binaries).
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+# Configuration
+NODE_VERSION="v20.11.1"
+NODE_BASE_URL="https://nodejs.org/dist/${NODE_VERSION}"
+
+# Detect platform
+ARCH=$(uname -m)
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+
+case "$ARCH" in
+  x86_64)  NODE_ARCH="x64" ;;
+  arm64)   NODE_ARCH="arm64" ;;
+  aarch64) NODE_ARCH="arm64" ;;
+  *)
+    echo "Unsupported architecture: $ARCH"
+    exit 1
+    ;;
+esac
+
+case "$OS" in
+  darwin) NODE_OS="darwin" ;;
+  linux)  NODE_OS="linux" ;;
+  *)
+    echo "Unsupported OS: $OS"
+    exit 1
+    ;;
+esac
+
+TARBALL="node-${NODE_VERSION}-${NODE_OS}-${NODE_ARCH}.tar.gz"
+DOWNLOAD_URL="${NODE_BASE_URL}/${TARBALL}"
+SHASUMS_URL="${NODE_BASE_URL}/SHASUMS256.txt"
+
+# Target triple for Tauri sidecar naming
+case "$OS-$ARCH" in
+  darwin-arm64)  TARGET_TRIPLE="aarch64-apple-darwin" ;;
+  darwin-x86_64) TARGET_TRIPLE="x86_64-apple-darwin" ;;
+  linux-x86_64)  TARGET_TRIPLE="x86_64-unknown-linux-gnu" ;;
+  linux-aarch64) TARGET_TRIPLE="aarch64-unknown-linux-gnu" ;;
+  linux-arm64)   TARGET_TRIPLE="aarch64-unknown-linux-gnu" ;;
+  *)
+    echo "Unsupported platform: $OS-$ARCH"
+    exit 1
+    ;;
+esac
+
+# Output directory
+BINARIES_DIR="./binaries"
+mkdir -p "$BINARIES_DIR"
+
+echo "Downloading Node.js ${NODE_VERSION} for ${NODE_OS}-${NODE_ARCH}..."
+
+# Download tarball
+curl -fsSL "$DOWNLOAD_URL" -o "/tmp/${TARBALL}"
+
+# Download and verify SHA256
+echo "Verifying SHA256 checksum..."
+EXPECTED_SHA=$(curl -fsSL "$SHASUMS_URL" | grep "$TARBALL" | awk '{print $1}')
+
+if [ -z "$EXPECTED_SHA" ]; then
+  echo "ERROR: Could not find SHA256 for $TARBALL"
+  exit 1
+fi
+
+ACTUAL_SHA=$(shasum -a 256 "/tmp/${TARBALL}" | awk '{print $1}')
+
+if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+  echo "ERROR: SHA256 mismatch!"
+  echo "  Expected: $EXPECTED_SHA"
+  echo "  Actual:   $ACTUAL_SHA"
+  rm -f "/tmp/${TARBALL}"
+  exit 1
+fi
+
+echo "SHA256 verified: $ACTUAL_SHA"
+
+# Extract the node binary
+echo "Extracting node binary..."
+tar -xzf "/tmp/${TARBALL}" \
+  -C /tmp \
+  "node-${NODE_VERSION}-${NODE_OS}-${NODE_ARCH}/bin/node"
+
+# Move and rename with target triple
+OUTPUT_NAME="node-${TARGET_TRIPLE}"
+mv "/tmp/node-${NODE_VERSION}-${NODE_OS}-${NODE_ARCH}/bin/node" \
+   "${BINARIES_DIR}/${OUTPUT_NAME}"
+
+# Make executable
+chmod +x "${BINARIES_DIR}/${OUTPUT_NAME}"
+
+# Clean up
+rm -rf "/tmp/${TARBALL}" \
+       "/tmp/node-${NODE_VERSION}-${NODE_OS}-${NODE_ARCH}"
+
+echo "Done: ${BINARIES_DIR}/${OUTPUT_NAME}"
+ls -lh "${BINARIES_DIR}/${OUTPUT_NAME}"
+```
+
+## Usage
+
+Save the script as `scripts/download-node.sh` and run it:
+
+```bash
+chmod +x scripts/download-node.sh
+./scripts/download-node.sh
+```
+
+This creates:
+
+```
+binaries/
+  node-aarch64-apple-darwin     (on Apple Silicon Mac)
+  node-x86_64-apple-darwin      (on Intel Mac)
+```
+
+## .gitignore the Binaries
+
+Node.js binaries are large (60-80MB). Do not commit them to git.
+
+```gitignore
+# .gitignore
+binaries/
+```
+
+Download them as part of your build setup or CI pipeline instead.
+
+## Tauri Sidecar Configuration
+
+To use the downloaded Node.js as a Tauri sidecar, add it to `tauri.conf.json`:
+
+```json
+{
+  "bundle": {
+    "externalBin": [
+      "binaries/node"
+    ]
+  }
+}
+```
+
+<Note>
+
+The `externalBin` path does not include the target triple suffix. Tauri automatically appends the correct suffix (e.g., `-aarch64-apple-darwin`) based on the build target. That is why the download script names the binary with the target triple.
+
+</Note>
+
+Then in your Rust code, invoke it:
+
+```rust
+use tauri::Manager;
+use tauri_plugin_shell::ShellExt;
+
+// Spawn Node.js with a script
+let output = app_handle
+    .shell()
+    .sidecar("node")
+    .expect("failed to create sidecar command")
+    .args(["server.js"])
+    .output()
+    .await
+    .expect("failed to run node");
+```
+
+## SHA256 Verification
+
+The script verifies the download against the official SHA256 checksums published by Node.js at:
+
+```
+https://nodejs.org/dist/v20.11.1/SHASUMS256.txt
+```
+
+This prevents installing a corrupted or tampered binary. If the checksum does not match, the script exits with an error.
+
+<Warning>
+
+Never skip SHA256 verification when downloading binaries. A corrupted Node.js binary can cause subtle, impossible-to-debug runtime errors, or worse, a supply-chain attack.
+
+</Warning>
+
+## Multiple Platforms
+
+If you need to bundle Node.js for multiple platforms (e.g., for cross-compilation), run the script once for each target:
+
+```bash
+# On an Apple Silicon Mac, download for both architectures
+./scripts/download-node.sh  # Gets arm64 automatically
+
+# For cross-compilation, modify the script or download manually:
+# curl the x86_64 tarball and rename appropriately
+```
+
+The `binaries/` directory should contain one binary per target:
+
+```
+binaries/
+  node-aarch64-apple-darwin
+  node-x86_64-apple-darwin
+  node-x86_64-unknown-linux-gnu
+```

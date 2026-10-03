@@ -1,0 +1,171 @@
+---
+title: E2E Test Split Strategy
+description: Splitting Playwright tests into CI-safe and @interactive categories for Tauri apps
+sidebar_position: 6
+---
+
+# E2E Test Split Strategy
+
+Tauri apps face a unique testing challenge: the WebView runs on the OS's WebKit engine, and the app's keyboard shortcut engine does not reliably receive keyboard events in CI's headless browser. This article documents a practical split strategy that runs most tests in CI while reserving keyboard-dependent tests for local execution.
+
+## The Problem
+
+Consider a test that opens the settings dialog:
+
+```ts
+test("opens settings dialog", async ({ page }) => {
+  await page.keyboard.press("Control+,");
+  await expect(page.getByTestId("settings-dialog")).toBeVisible();
+});
+```
+
+This test works perfectly on a developer's machine but fails intermittently (or always) in CI because:
+
+1. **Headless browsers handle keyboard shortcuts differently** -- The shortcut engine listens for `keydown` events, but headless Chromium may not dispatch them identically to a real browser
+2. **The app's shortcut engine needs focus** -- In CI, the page may not have the right focus context for shortcuts to fire
+3. **Timing issues** -- The shortcut engine initializes asynchronously; the test may send the key event before the engine is ready
+
+Meanwhile, tests that use DOM APIs directly (clicking buttons, reading text content, asserting visibility) work reliably in both local and CI environments.
+
+## Two Test Categories
+
+### CI-Safe Tests
+
+These tests interact with the DOM directly -- clicks, `page.evaluate()`, assertions on element visibility/content. They do not depend on keyboard shortcuts.
+
+```ts
+test.describe("Core Navigation", () => {
+  test("navigates to archives via sidebar click", async ({ page }) => {
+    await page.click('[data-testid="nav-archives"]');
+    await expect(page.getByTestId("archives-page")).toBeVisible();
+  });
+});
+```
+
+### `@interactive` Tests
+
+These tests require the app's shortcut engine to process keyboard events. They are tagged with `@interactive` in the `test.describe` name:
+
+```ts
+test.describe("Settings Dialog @interactive", () => {
+  test("opens with Ctrl+,", async ({ page }) => {
+    await page.keyboard.press("Control+,");
+    await expect(page.getByTestId("settings-dialog")).toBeVisible();
+  });
+
+  test("opens command palette with Ctrl+K", async ({ page }) => {
+    await page.keyboard.press("Control+k");
+    await expect(page.getByTestId("command-palette")).toBeVisible();
+  });
+});
+```
+
+## CI Configuration
+
+CI runs tests with `--grep-invert` to exclude `@interactive` tests:
+
+```bash
+# What CI runs (excludes @interactive)
+pnpm test:e2e --project=chromium --grep-invert="@interactive"
+```
+
+Local development runs all tests:
+
+```bash
+# Run all tests locally (includes @interactive)
+pnpm test:e2e
+
+# Run only @interactive tests
+pnpm test:e2e --grep="@interactive"
+```
+
+## Test File Organization
+
+Tests are organized by feature, not by category. Each spec file may contain both CI-safe and `@interactive` test blocks:
+
+```
+e2e/
+  command-palette.spec.ts         # @interactive (keyboard shortcuts)
+  core-navigation.spec.ts         # CI-safe (clicks)
+  display-scale.spec.ts           # CI-safe (DOM assertions)
+  draft-shortcut-guard.spec.ts    # @interactive (keyboard shortcuts)
+  indent-guides.spec.ts           # CI-safe (visual assertions)
+  list-indent-wrap.spec.ts        # CI-safe (editor behavior)
+  panel-divider-drag.spec.ts      # CI-safe (mouse drag)
+  settings-dialog.spec.ts         # @interactive (Ctrl+, to open)
+  split-pane.spec.ts              # CI-safe (DOM assertions)
+  write-and-archive.spec.ts       # CI-safe (clicks and text input)
+  zoom-fix-verification.spec.ts   # CI-safe (CSS assertions)
+  helpers.ts                      # Shared test utilities
+```
+
+<Tip>
+
+When creating a new test file, ask: "Does this test trigger app commands via keyboard shortcuts?" If yes, tag with `@interactive`. If it only uses clicks, `page.evaluate()`, and DOM assertions, it is CI-safe and needs no tag.
+
+</Tip>
+
+## WebKit Requirement
+
+Since Tauri apps use the OS WebKit engine (not Chromium), all Playwright tests should use the WebKit browser for local verification:
+
+```ts
+// playwright.config.ts
+export default defineConfig({
+  projects: [
+    {
+      name: "webkit",
+      use: { ...devices["Desktop Safari"] },
+    },
+  ],
+});
+```
+
+<Warning>
+
+Chromium-based test results may differ from what users actually see. A test that passes in Chromium might fail in the real app because WebKit handles CSS, events, or focus differently. Always verify locally with WebKit.
+
+</Warning>
+
+CI uses Chromium for practical reasons (it is faster and more stable in headless mode), but the CI tests are explicitly designed to avoid WebKit-specific behaviors. The `@interactive` tests that exercise deeper browser integration are only run locally with WebKit.
+
+## Writing New Tests
+
+Follow this decision tree:
+
+1. **Does the test use keyboard shortcuts (Ctrl+K, Ctrl+,, etc.)?**
+- Yes -> Tag with `@interactive`
+- No -> Continue
+
+2. **Does the test rely on focus-dependent behavior (shortcut engine, vim mode)?**
+- Yes -> Tag with `@interactive`
+- No -> It is CI-safe, no tag needed
+
+3. **Shared utilities go in `helpers.ts`** -- Page object patterns, common setup, and wait helpers.
+
+Example of a well-structured test file with both categories:
+
+```ts
+import { test, expect } from "@playwright/test";
+
+// CI-safe: uses DOM clicks
+test.describe("Settings Display", () => {
+  test("shows display scale options", async ({ page }) => {
+    // Open settings via DOM click (not keyboard shortcut)
+    await page.click('[data-testid="settings-button"]');
+    await expect(page.getByTestId("display-scale-options")).toBeVisible();
+  });
+});
+
+// Interactive: uses keyboard shortcut
+test.describe("Settings Shortcut @interactive", () => {
+  test("Ctrl+, opens settings", async ({ page }) => {
+    await page.keyboard.press("Control+,");
+    await expect(page.getByTestId("settings-dialog")).toBeVisible();
+  });
+});
+```
+
+## Key Takeaway
+
+The split strategy is pragmatic: **run what you can in CI, run what you cannot locally.** The `@interactive` tag is a simple grep-based filter that requires no special Playwright plugins or configuration. It ensures CI stays green while still allowing thorough local testing of keyboard-driven features.
